@@ -145,7 +145,7 @@ nanite ─── nanite-render ─── nanite-gsx
 | `"use server"` mutations | `@action` — colocated mutations, hoisted to `.Action()` |
 | CSS/JS imports | `@css` / `@js` — compiled to `c.RequiresCSS`/`c.RequiresJS`, deduped into `<NANO_ASSETS/>` |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
-| Client islands (Alpine.js) | Native — `@click` passes through, `x-data={go}` auto-hydrates to JSON, `x-cloak` auto-injected |
+| Client islands (Alpine.js) | `@hydrate("x-data", state)` for any attribute + native `@click` passthrough, `x-data={go}` auto-hydration, `x-cloak` injection |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
@@ -667,7 +667,14 @@ c.WriteHydrateProps("x-data", map[string]any{"open": isOpen, "list": items})  //
 c.WriteString(`>`)
 ```
 
-Go struct → Alpine state in one attribute. No `@hydrate` wrapper needed for the common case — the compiler recognizes `x-data` and does the right thing automatically. (`@hydrate("attr", state)` remains for non-Alpine attributes.)
+**Two hydration syntaxes, one bridge:**
+
+| Syntax | Use for |
+|---|---|
+| `@hydrate("x-data", state)` | Explicit — ANY attribute name (Alpine `x-data`, `x-init`, or custom `data-props`) |
+| `x-data={goExpr}` | Implicit — the compiler recognizes the Alpine attribute and auto-converts |
+
+Both compile to `c.WriteHydrateProps` — nanite-render's JSON-serialized, HTML-escaped hydration bridge. Use the explicit form when you want control over the attribute name; use the implicit form when you just want Alpine state from a Go value. `@hydrate` remains the general-purpose escape hatch for non-Alpine attributes (`data-*`, HTMX extensions, vanilla JS).
 
 ### Flash form errors (`@error`)
 
