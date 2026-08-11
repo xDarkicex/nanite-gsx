@@ -29,9 +29,15 @@ func GenerateFile(files []*parser.ParsedFile) (string, error) {
 	main := files[0]
 	g := &generator{buf: new(bytes.Buffer)}
 	g.parsed = main
+	g.symbols = buildSymbols(main)
 	g.emitHeader()
-	if _, err := g.walk(0, main.Body.Count); err != nil {
-		return "", err
+	// The stream starts with a synthetic document root (index 0) —
+	// walk its children (the top-level nodes) via the sibling chain.
+	fc := int(main.Body.FirstChild[0])
+	if fc != -1 {
+		if _, err := g.walk(fc, g.siblingEnd(fc)); err != nil {
+			return "", err
+		}
 	}
 	g.indent = 0
 	g.line("return nil")
@@ -43,12 +49,37 @@ func GenerateFile(files []*parser.ParsedFile) (string, error) {
 		g.parsed = f
 		g.line("")
 		g.line("")
+		// Zero-byte marker type for cross-package imports.
+		g.linef("type %s struct{}", f.FuncName)
+		g.line("")
+
+		// Multi-param additional funcs get their own props struct.
+		if len(f.Params) > 1 {
+			g.linef("type %sProps struct {", f.FuncName)
+			g.indent++
+			for _, param := range f.Params {
+				fields := strings.Fields(param)
+				if len(fields) < 2 {
+					continue
+				}
+				name := fields[0]
+				typ := fields[len(fields)-1]
+				exported := strings.ToUpper(name[:1]) + name[1:]
+				g.linef("%s %s `nanite:%q`", exported, typ, name)
+			}
+			g.indent--
+			g.line("}")
+			g.line("")
+		}
 		params := append([]string{"c *render.ComponentContext"}, f.Params...)
 		params = append(params, "children func(c *render.ComponentContext) error")
 		g.linef("func Render%s(%s) error {", f.FuncName, strings.Join(params, ", "))
 		g.indent = 1
-		if _, err := g.walk(0, f.Body.Count); err != nil {
-			return "", err
+		fc := int(f.Body.FirstChild[0])
+		if fc != -1 {
+			if _, err := g.walk(fc, g.siblingEnd(fc)); err != nil {
+				return "", err
+			}
 		}
 		g.indent = 0
 		g.line("return nil")
@@ -61,6 +92,46 @@ type generator struct {
 	buf    *bytes.Buffer
 	parsed *parser.ParsedFile
 	indent int
+	// symbols maps imported component tags to their package
+	// alias: "Button" → "ui" means <Button/> resolves to
+	// ui.RenderButton. Built from @import { X } from "..." —
+	// the TSX-style cross-package composition mechanism.
+	symbols map[string]string
+}
+
+// bodyHasExprs reports whether the body contains Go expressions
+// ({expr}, dynamic attributes) that need the fmt/html imports.
+func bodyHasExprs(p *parser.ParsedFile) bool {
+	s := p.Body
+	for i := 0; i < s.Count; i++ {
+		if s.Kind[i] == ir.KindExpr || s.Kind[i] == ir.KindRawExpr {
+			return true
+		}
+		for k := int(s.AttrStart[i]); k < int(s.AttrEnd[i]); k++ {
+			if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// buildSymbols maps destructured import symbols to their package
+// alias. <Button/> in the template resolves to ui.RenderButton
+// when Button was imported via @import { Button } from
+// "myapp/components/ui".
+func buildSymbols(p *parser.ParsedFile) map[string]string {
+	m := make(map[string]string)
+	for _, imp := range p.Imports {
+		if len(imp.Symbols) == 0 {
+			continue
+		}
+		alias := genPkgAlias(imp)
+		for _, sym := range imp.Symbols {
+			m[sym] = alias
+		}
+	}
+	return m
 }
 
 func (g *generator) emitHeader() {
@@ -73,16 +144,21 @@ func (g *generator) emitHeader() {
 	g.linef("package %s", pkg)
 	g.line("")
 
-	// Imports.
+	// Imports. fmt/html are only needed when the body contains
+	// {expressions} (escaping) — a static-only component skips them
+	// so `go build` doesn't fail with "imported and not used".
 	g.line("import (")
-	g.line(`"fmt"`)
-	g.line(`"html"`)
+	hasExprs := bodyHasExprs(p)
+	if hasExprs {
+		g.line(`"fmt"`)
+		g.line(`"html"`)
+	}
 	for _, imp := range p.Imports {
 		switch {
 		case imp.Alias != "" && len(imp.Symbols) == 0:
 			g.linef(`%s %q`, imp.Alias, imp.Path)
 		case len(imp.Symbols) > 0:
-			g.linef(`%s %q`, g.genPkgAlias(imp), imp.Path)
+			g.linef(`%s %q`, genPkgAlias(imp), imp.Path)
 		default:
 			// Plain @import "path" — a normal Go import.
 			g.linef(`%q`, imp.Path)
@@ -98,7 +174,7 @@ func (g *generator) emitHeader() {
 	if len(p.Imports) > 0 {
 		for _, imp := range p.Imports {
 			if len(imp.Symbols) > 0 {
-				alias := g.genPkgAlias(imp)
+				alias := genPkgAlias(imp)
 				for _, sym := range imp.Symbols {
 					g.linef("type %s = %s.%s", sym, alias, sym)
 				}
@@ -127,6 +203,14 @@ func (g *generator) emitHeader() {
 		g.line("}")
 		g.line("")
 	}
+
+		// The zero-byte marker type: `type X struct{}` exists solely so
+	// cross-package `@import { X } from "..."` compiles as a Go
+	// type alias (`type X = pkg.X`) even though the component is
+	// actually the function `RenderX`. Costs zero bytes at runtime;
+	// the symbol table resolves <X/> tags to pkg.RenderX.
+	g.linef("type %s struct{}", p.FuncName)
+	g.line("")
 
 	// The strongly-typed render function. Children closure is always
 	// the last param — callers pass nil when there are no children.
@@ -447,10 +531,19 @@ func (g *generator) emitComponent(i int) (int, error) {
 	start := int(s.AttrStart[i])
 	end := int(s.AttrEnd[i])
 
+	// Resolve the render function: same-package components are
+	// local (RenderName); destructured-imported components are
+	// qualified (ui.RenderName) via the symbol table — the
+	// TSX-style cross-package composition mechanism.
+	fn := "Render" + name
+	if alias, ok := g.symbols[name]; ok {
+		fn = alias + "." + fn
+	}
+
 	// Collect positional args from attributes.
 	var args []string
 	for k := start; k < end; k++ {
-		args = append(args, g.genCompArg(s.AttrKeys[k], s.AttrVals[k]))
+		args = append(args, g.genCompArg(k, s.AttrVals[k]))
 	}
 
 	// Children: if this component was opened (not self-closing),
@@ -459,7 +552,7 @@ func (g *generator) emitComponent(i int) (int, error) {
 	fc := int(s.FirstChild[i])
 	if fc != -1 {
 		childEnd := g.siblingEnd(fc)
-		g.linef("if err := Render%s(c, %s, func(c *render.ComponentContext) error {", name, strings.Join(args, ", "))
+		g.linef("if err := %s(c, %s, func(c *render.ComponentContext) error {", fn, strings.Join(args, ", "))
 		g.indent++
 		if _, err := g.walk(fc, childEnd); err != nil {
 			return 0, err
@@ -472,7 +565,7 @@ func (g *generator) emitComponent(i int) (int, error) {
 
 	// No children — self-closing component.
 	args = append(args, "nil")
-	call := fmt.Sprintf("if err := Render%s(c", name)
+	call := fmt.Sprintf("if err := %s(c", fn)
 	if len(args) > 0 {
 		call += ", " + strings.Join(args, ", ")
 	}
@@ -481,7 +574,7 @@ func (g *generator) emitComponent(i int) (int, error) {
 	return consumed, nil
 }
 
-func (g *generator) genPkgAlias(imp parser.Import) string {
+func genPkgAlias(imp parser.Import) string {
 	if imp.Alias != "" {
 		return imp.Alias
 	}
@@ -495,8 +588,13 @@ func (g *generator) genPkgAlias(imp parser.Import) string {
 
 // genCompArg formats a component attribute as a Go function argument.
 // Keys are ignored in positional-style — all values are passed positionally.
-func (g *generator) genCompArg(_, val string) string {
-	return val
+func (g *generator) genCompArg(k int, val string) string {
+	// Dynamic attrs ({expr}) pass the Go expression raw; static
+	// attrs ("str") are string literals — quote them.
+	if k < len(g.parsed.Body.AttrDynamic) && g.parsed.Body.AttrDynamic[k] {
+		return val
+	}
+	return fmt.Sprintf("%q", val)
 }
 
 func (g *generator) siblingEnd(start int) int {

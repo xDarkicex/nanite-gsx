@@ -332,23 +332,31 @@ func (p *parser) parseImport() (Import, error) {
 		return imp, nil
 	case lexer.KindLBRACE:
 		// @import { A, B } from "path"
-		p.scanner.Scan() // skip {
+		// The { was the token we matched — scan the symbols
+		// inside until the closing brace.
 		for {
 			t := p.scanner.Scan()
-			if t.Kind == lexer.KindRBRACE {
-				break
-			}
-			if t.Kind == lexer.KindIdent {
+			switch t.Kind {
+			case lexer.KindRBRACE:
+				goto from
+			case lexer.KindIdent:
 				imp.Symbols = append(imp.Symbols, t.String(p.src))
+			case lexer.KindComma:
+				// separator — skip
+			case lexer.KindEOF:
+				return imp, fmt.Errorf("unexpected EOF in @import { ... }")
 			}
-			// skip commas
 		}
-		p.scanner.Scan() // skip from
-		str := p.scanner.Scan()
-		if str.Kind != lexer.KindString {
-			return imp, fmt.Errorf("expected string after 'from', got %s", str.String(p.src))
+	from:
+		// Optional "from" keyword, then the path string.
+		f := p.scanner.Scan()
+		if f.Kind == lexer.KindIdent && f.String(p.src) == "from" {
+			f = p.scanner.Scan()
 		}
-		imp.Path = unquote(str, p.src)
+		if f.Kind != lexer.KindString {
+			return imp, fmt.Errorf("expected string after 'from', got %s", f.String(p.src))
+		}
+		imp.Path = unquote(f, p.src)
 		return imp, nil
 	case lexer.KindIdent:
 		// Could be "alias from "path"" or just "alias"
@@ -468,6 +476,15 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 			if err := p.parseIf(b); err != nil {
 				return ir.NodeStream{}, err
 			}
+		case lexer.KindAtElse:
+			// Close the previous @if and open an @else block.
+			b.CloseControl()
+			b.OpenElse()
+			blockDepth++
+			// Consume the block-opening { (no condition on else).
+			if _, err := p.readCond(); err != nil {
+				return ir.NodeStream{}, err
+			}
 		case lexer.KindAtChildren:
 			b.AddChildren()
 
@@ -551,88 +568,71 @@ func (p *parser) parseTag(b *ir.Builder, openTok lexer.Token) error {
 	return nil
 }
 
-func (p *parser) parseIf(b *ir.Builder) error {
+// readCond captures the raw source bytes from the current
+// position up to the block-opening { — preserving the Go exactly
+// (spaces, :=, operators). String literals in the condition are
+// skipped so braces inside strings don't confuse the search.
+func (p *parser) readCond() (string, error) {
 	var cond strings.Builder
-	depth := 0
 	for {
-		tok := p.scanner.Scan()
-		switch tok.Kind {
-		case lexer.KindExpr:
-			// { expr } — if the expression is just "{" with whitespace,
-			// this is the if-body opener.
-			s := tok.String(p.src)
-			if s == "{" || (len(s) >= 2 && s[1] == '}') {
-				// This { is the body opener; the condition is done.
-				b.OpenIf(strings.TrimSpace(cond.String()))
-				return nil
-			}
-			cond.WriteString(s)
-		case lexer.KindLBRACE:
-			if depth == 0 {
-				b.OpenIf(strings.TrimSpace(cond.String()))
-				return nil
-			}
-			cond.WriteString("{")
-			depth++
-		case lexer.KindRBRACE:
-			if depth > 0 {
-				cond.WriteString("}")
-				depth--
-			} else {
-				b.CloseControl()
-				return nil
-			}
-		case lexer.KindAtElse:
-			b.CloseControl()
-			b.OpenElse()
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return "", fmt.Errorf("unexpected EOF in control-flow condition")
+		}
+		switch b {
+		case '{':
+			return strings.TrimSpace(cond.String()), nil
+		case '"', '\'', '`':
+			cond.WriteByte(b)
 			for {
-				t := p.scanner.Scan()
-				if t.Kind == lexer.KindLBRACE || t.Kind == lexer.KindExpr {
-					return nil
+				c := p.scanner.NextByte()
+				if c == 0 {
+					return "", fmt.Errorf("unexpected EOF in condition string")
+				}
+				cond.WriteByte(c)
+				if c == '\\' {
+					e := p.scanner.NextByte()
+					if e == 0 {
+						return "", fmt.Errorf("unexpected EOF in condition string escape")
+					}
+					cond.WriteByte(e)
+					continue
+				}
+				if c == b {
+					break
 				}
 			}
-		case lexer.KindEOF:
-			return fmt.Errorf("unexpected EOF in @if condition")
 		default:
-			cond.WriteString(tok.String(p.src))
+			cond.WriteByte(b)
 		}
 	}
+}
+
+func (p *parser) parseIf(b *ir.Builder) error {
+	cond, err := p.readCond()
+	if err != nil {
+		return err
+	}
+	b.OpenIf(cond)
+	return nil
 }
 
 func (p *parser) parseFor(b *ir.Builder) error {
-	var cond strings.Builder
-	for {
-		tok := p.scanner.Scan()
-		switch tok.Kind {
-		case lexer.KindLBRACE:
-			b.OpenFor(strings.TrimSpace(cond.String()))
-			return nil
-		case lexer.KindExpr:
-			b.OpenFor(strings.TrimSpace(cond.String()))
-			return nil
-		case lexer.KindEOF:
-			return fmt.Errorf("unexpected EOF in @for condition")
-		default:
-			cond.WriteString(tok.String(p.src))
-		}
+	cond, err := p.readCond()
+	if err != nil {
+		return err
 	}
+	b.OpenFor(cond)
+	return nil
 }
 
 func (p *parser) parseSwitch(b *ir.Builder) error {
-	var cond strings.Builder
-	for {
-		tok := p.scanner.Scan()
-		switch tok.Kind {
-		case lexer.KindLBRACE:
-			b.OpenSwitch(strings.TrimSpace(cond.String()))
-			return nil
-		case lexer.KindExpr:
-			b.OpenSwitch(strings.TrimSpace(cond.String()))
-			return nil
-		default:
-			cond.WriteString(tok.String(p.src))
-		}
+	cond, err := p.readCond()
+	if err != nil {
+		return err
 	}
+	b.OpenSwitch(cond)
+	return nil
 }
 
 // parseTagName splits "<Tagname key=val key2=val2" into name and

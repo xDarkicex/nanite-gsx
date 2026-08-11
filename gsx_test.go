@@ -323,6 +323,78 @@ func TestE2E_MultiParam(t *testing.T) {
 	t.Logf("\nGenerated output:\n%s", got)
 }
 
+// TestE2E_CrossPackage verifies destructured imports resolve
+// component tags to qualified package calls (TSX-style).
+func TestE2E_CrossPackage(t *testing.T) {
+	src := `@import { Button, Input } from "myapp/components/ui"
+
+func LoginForm() {
+    <form hx-post="/login">
+        <Input type="email" name="email" />
+        <Button type="submit">Login</Button>
+    </form>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		`ui "myapp/components/ui"`,           // package alias import
+		"type Button = ui.Button",            // type alias for expressions
+		"if err := ui.RenderInput(c, \"email\", \"email\", nil); err != nil { return err }",
+		"ui.RenderButton(c, \"submit\", func(c *render.ComponentContext) error {",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_IfElse verifies @if/@else with raw condition capture.
+func TestE2E_IfElse(t *testing.T) {
+	src := `func Greeting(user models.User) {
+    @if user.Admin {
+        <span>admin</span>
+    } @else {
+        <span>user</span>
+    }
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		"if user.Admin {",
+		"`admin`",
+		"} else {",
+		"`user`",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

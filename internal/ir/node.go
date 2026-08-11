@@ -23,6 +23,7 @@ const (
 	KindCase                     // @case val: (child of KindSwitch)
 	KindDefault                  // @default: (child of KindSwitch)
 	KindView                     // marker: start of a @view/component region
+	KindFragment                 // synthetic document root (index 0)
 )
 
 // NodeStream is the flat, structure-of-arrays AST produced by

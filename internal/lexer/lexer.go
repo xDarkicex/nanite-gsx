@@ -50,6 +50,7 @@ const (
 	KindAtAction  // @action name(rc, props) error { ... }
 
 	KindColon     // :
+	KindComma     // ,
 )
 
 // Token is a span of bytes in the source with a Kind
@@ -138,6 +139,9 @@ func (s *Scanner) Scan() Token {
 	case b == ':':
 		s.pos++
 		return Token{Kind: KindColon, Start: s.pos - 1, End: s.pos}
+	case b == ',':
+		s.pos++
+		return Token{Kind: KindComma, Start: s.pos - 1, End: s.pos}
 	case b == '(':
 		s.pos++
 		return Token{Kind: KindLParen, Start: s.pos - 1, End: s.pos}

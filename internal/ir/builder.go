@@ -8,10 +8,20 @@ type Builder struct {
 	stack  []int // parent node indices during tree construction
 }
 
-// NewBuilder returns an empty Builder.
+// NewBuilder returns a Builder with a synthetic document root
+// (KindFragment) at index 0. The root is pushed onto the stack so
+// every top-level node gets proper parent/sibling links — the
+// codegen relies on sibling chains for @else, @case, etc.
 func NewBuilder() *Builder {
-	return &Builder{}
+	b := &Builder{}
+	b.stream.Kind = append(b.stream.Kind, KindFragment)
+	b.ensureLen(1)
+	b.stack = append(b.stack, 0)
+	return b
 }
+
+// root returns true if i is the synthetic document root.
+func root(i int) bool { return i == 0 }
 
 // Stream returns the constructed NodeStream. The builder remains
 // usable after this call (the stream is NOT consumed).
@@ -85,7 +95,9 @@ func (b *Builder) AddChildren() {
 // are the component's body.
 func (b *Builder) CloseComponent(name string) {
 	if len(b.stack) > 0 {
-		b.stack = b.stack[:len(b.stack)-1]
+		if len(b.stack) > 1 {
+			b.stack = b.stack[:len(b.stack)-1]
+		}
 	}
 }
 
@@ -106,7 +118,9 @@ func (b *Builder) CloseTag(tag string) {
 	b.stream.Tag = append(b.stream.Tag, tag)
 	b.addCommon()
 	if len(b.stack) > 0 {
-		b.stack = b.stack[:len(b.stack)-1]
+		if len(b.stack) > 1 {
+			b.stack = b.stack[:len(b.stack)-1]
+		}
 	}
 }
 
@@ -158,7 +172,9 @@ func (b *Builder) OpenDefault() {
 // node — it doesn't exist in the stream — so we just pop.
 func (b *Builder) CloseControl() {
 	if len(b.stack) > 0 {
-		b.stack = b.stack[:len(b.stack)-1]
+		if len(b.stack) > 1 {
+			b.stack = b.stack[:len(b.stack)-1]
+		}
 	}
 }
 
