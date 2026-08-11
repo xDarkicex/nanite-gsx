@@ -100,6 +100,16 @@ type generator struct {
 	symbols map[string]string
 }
 
+// importsPath reports whether the .gsx file already imports path.
+func importsPath(p *parser.ParsedFile, path string) bool {
+	for _, imp := range p.Imports {
+		if imp.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
 // bodyHasExprs reports whether the body contains Go expressions
 // ({expr}, dynamic attributes) that need the fmt/html imports.
 func bodyHasExprs(p *parser.ParsedFile) bool {
@@ -159,8 +169,15 @@ func (g *generator) emitHeader() {
 	g.line("import (")
 	hasExprs := bodyHasExprs(p)
 	if hasExprs {
-		g.line(`"fmt"`)
-		g.line(`"html"`)
+		// Skip auto fmt/html when the .gsx file imported them
+		// explicitly (e.g. for @action/@memo bodies) — a
+		// duplicate import would fail go build.
+		if !importsPath(p, "fmt") {
+			g.line(`"fmt"`)
+		}
+		if !importsPath(p, "html") {
+			g.line(`"html"`)
+		}
 	}
 	for _, imp := range p.Imports {
 		switch {
