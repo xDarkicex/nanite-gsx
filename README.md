@@ -1,8 +1,8 @@
 # nanite-gsx
 
-### The React/TSX-like template language for Go. AOT-compiled. Zero runtime dependencies.
+### The React/TSX template language for the nanite stack. AOT-compiled. render.Engine native.
 
-Write components like JSX. Ship functions that write to `io.Writer`. No virtual DOM, no runtime library, no framework lock-in — just pure, compiled Go with `0 B/op` on the render path.
+Write components like JSX. Compile to Go functions with native `ComponentContext` access. Direct Go function calls for component composition — no string lookups, no reflection, `0 B/op` on the render path.
 
 ---
 
@@ -21,27 +21,41 @@ Write components like JSX. Ship functions that write to `io.Writer`. No virtual 
   │    </div>                            │
   │  }                                   │
   └──────────────┬───────────────────────┘
-                 │  gsx compile ./views
+                 │  gsx compile
                  ▼
   ┌──────────────────────────────────────┐
-  │  Generated Go (zero deps)            │
+  │  Generated Go                        │
   │                                      │
-  │  func RenderUserCard(w io.Writer,    │
-  │    user models.User) error {         │
-  │    w.Write([]byte(`<div...>`))       │
-  │    io.WriteString(w,                 │
+  │  func RenderUserCard(                │
+  │    c *render.ComponentContext,       │
+  │    user models.User,                 │
+  │  ) error {                           │
+  │    c.WriteString(`<div...>`)         │
+  │    c.WriteString(                    │
   │      html.EscapeString(user.Name))   │
   │    if user.Admin {                   │
-  │      RenderAdminBadge(w)             │
+  │      RenderAdminBadge(c)             │
   │    }                                 │
   │    return nil                        │
   │  }                                   │
+  │                                      │
+  │  func RegisterUserCard(e *gsx.Engine) {  │
+  │    e.Register("UserCard", ...)       │
+  │  }                                   │
   └──────────────┬───────────────────────┘
-                 │  works anywhere
+                 │  implements render.Engine
                  ▼
   ┌──────────────────────────────────────┐
-  │  net/http · nanite · chi · gin       │
-  │  No runtime. No virtual DOM.         │
+  │  nanite-render composition hub       │
+  │  Same API as jade, templ, html/tmpl  │
+  │  reg.RenderNamed(rc, "gsx", ...)     │
+  │  nano.RenderPage(c, reg, ...)        │
+  └──────────────┬───────────────────────┘
+                 │
+                 ▼
+  ┌──────────────────────────────────────┐
+  │  nanite router                       │
+  │  190k req/s · 0 allocs per route     │
   └──────────────────────────────────────┘
 ```
 
@@ -49,9 +63,9 @@ Write components like JSX. Ship functions that write to `io.Writer`. No virtual 
 
 ## Why nanite-gsx
 
-### The React DX, Go performance
+### The React DX, compiled to Go
 
-`.gsx` gives you the component model of JSX — capital-letter tags, `{expressions}`, `@if`/`@for` blocks — but compiles to **zero-dependency Go functions**. No virtual DOM diffing. No runtime library. No reflection. The generated code is what you'd write by hand.
+`.gsx` gives you the component model of JSX — capital-letter tags, `{expressions}`, `@if`/`@for` blocks — but compiles to native Go functions that take `*render.ComponentContext`. No `io.Writer` indirection. No runtime library. Every superpower is a direct method call.
 
 ```gsx
 func UserList(users []models.User) {
@@ -63,37 +77,64 @@ func UserList(users []models.User) {
 }
 ```
 
-`<UserCard user={u} />` compiles to `RenderUserCard(w, u)` — a **direct Go function call**. The Go compiler catches type mismatches at build time. No string-based registry lookup. No reflection.
-
-### Built for nanite-render + nanite router
-
-`.gsx` is the template language for the [nanite](https://github.com/xDarkicex/nanite) + [nanite-render](https://github.com/xDarkicex/nanite-render) stack. When compiled with the nanite target, it auto-generates component registration wrappers:
+Compiles to:
 
 ```go
-func init() {
-    render.DefaultRegistry.Define("UserCard").
-        Render(func(c *render.ComponentContext) error {
-            props := render.BindProps[UserCardProps](c.Data)
-            return RenderUserCard(c.Writer, props)
-        }).
-        Register(render.DefaultRegistry)
+func RenderUserList(c *render.ComponentContext, users []models.User) error {
+    c.WriteString(`<div class="grid">`)
+    for _, u := range users {
+        if err := RenderUserCard(c, u); err != nil { return err }
+    }
+    c.WriteString(`</div>`)
+    return nil
 }
 ```
 
-But `.gsx` works **anywhere**. The standalone target emits pure Go with `io.Writer` — use it with `net/http`, `chi`, `gin`, or just a `strings.Builder`.
+`<UserCard user={u} />` → `RenderUserCard(c, u)` — a **direct Go function call**. Type-checked by `go build`. Zero allocations. Zero registry lookups.
 
-### Inspired by Next.js and React
+### A render.Engine — like every other template language
+
+`gsx.Engine` implements `render.Engine`. It plugs into nanite-render's composition hub exactly like `engine.Jade`, `engine.HTMLTemplate`, and `engine.HTML`:
+
+```go
+gsxEngine := gsx.New()
+views.RegisterDashboard(gsxEngine)
+views.RegisterHeader(gsxEngine)
+
+reg := render.New(render.WithEngine(gsxEngine))
+
+// Same API for every engine — gsx, jade, templ, html-template:
+reg.RenderNamed(rc, "gsx", "dashboard", data)
+nano.RenderPage(c, reg, "layouts/app", "dashboard", data)
+```
+
+### Built for the nanite stack
+
+nanite-gsx is the template language for [nanite](https://github.com/xDarkicex/nanite) (the router) and [nanite-render](https://github.com/xDarkicex/nanite-render) (the composition hub). Three repos, one framework:
+
+```
+nanite ─── nanite-render ─── nanite-gsx
+  │              │                │
+  │ routes       │ cache          │ .gsx → Go
+  │ middleware   │ components     │ engine adapter
+  │ HTTP         │ HTMX, state    │ direct calls
+```
+
+### Inspired by React and Next.js
 
 | React / Next.js | nanite-gsx |
 |---|---|
 | `.tsx` files | `.gsx` files — one file, one component |
-| JSX expressions `<h1>{name}</h1>` | `{name}` — the same syntax |
+| JSX `<h1>{name}</h1>` | `{name}` — same syntax, HTML-escaped |
 | `{condition && <Thing/>}` | `@if condition { <Thing/> }` |
 | `.map()` loops | `@for _, item := range items { ... }` |
-| `<CapitalComponent prop={v}/>` | Same — direct Go function dispatch |
-| `"use server"` mutations | nanite-render `.Action("name", fn)` |
-| `useId()` | nanite-render `c.UseId()` |
-| `import { X } from "..."` | `@import { X } from "..."` — ES6-style imports |
+| `<CapitalComponent prop={v}/>` | `<UserCard user={u}/>` → `RenderUserCard(c, u)` — direct Go call |
+| `"use server"` mutations | nanite-render `.Action("name", fn)` — HTMX-native |
+| `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
+| Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
+| Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
+| `<Suspense>` / fallback | `.Async().Fallback(fn)` — streams via HTMX OOB |
+| `import { X } from "..."` | `@import { X } from "..."` — ES6-style, compiled to Go aliases |
 
 ---
 
@@ -102,13 +143,13 @@ But `.gsx` works **anywhere**. The standalone target emits pure Go with `io.Writ
 ### Installation
 
 ```bash
-go install github.com/xDarkicex/nanite-gsx/cmd/gsx@latest
+go get github.com/xDarkicex/nanite-gsx
 ```
 
 ### Write a component
 
 ```gsx
-// user_card.gsx
+// views/user_card.gsx
 @import "myapp/models"
 
 func UserCard(user models.User) {
@@ -122,51 +163,47 @@ func UserCard(user models.User) {
 }
 ```
 
-### Compile
+### Generate the Go code
 
 ```bash
-# Standalone — pure Go, works anywhere
-gsx compile ./views --target=standalone
-
-# Nanite — auto-registers with nanite-render
-gsx compile ./views --target=nanite
+gsx compile ./views
 ```
 
-Output: `user_card_gsx.go` — a `func RenderUserCard(w io.Writer, user models.User) error` that writes HTML directly to the writer.
-
-### Use it
+Produces `views/user_card_gsx.go`:
 
 ```go
-// Standalone — no framework needed
-http.HandleFunc("/users/:id", func(w http.ResponseWriter, r *http.Request) {
-    user := loadUser(r.PathValue("id"))
-    RenderUserCard(w, user)
-})
-```
+// Code generated by nanite-gsx. DO NOT EDIT.
+package views
 
----
+import (
+    "fmt"
+    "html"
+    models "myapp/models"
+)
 
-## Examples with nanite-render + nanite router
+func RenderUserCard(c *render.ComponentContext, user models.User) error {
+    c.WriteString(`<div class="user-card"><h3>`)
+    c.WriteString(html.EscapeString(fmt.Sprint(user.Name)))
+    c.WriteString(`</h3><p>`)
+    c.WriteString(html.EscapeString(fmt.Sprint(user.Email)))
+    c.WriteString(`</p>`)
+    if user.IsAdmin {
+        c.WriteString(`<span class="badge badge-admin">ADMIN</span>`)
+    }
+    c.WriteString(`</div>`)
+    return nil
+}
 
-### Full-stack page with components
-
-```gsx
-// views/header.gsx
-@import "myapp/models"
-
-func Header(user models.User) {
-    <header class="app-header">
-        <a href="/"><img src="/logo.svg" alt="Logo"/></a>
-        <nav>
-            <a href="/dashboard">Dashboard</a>
-            <span class="user">{user.Name}</span>
-        </nav>
-    </header>
+func RegisterUserCard(e *gsx.Engine) {
+    e.Register("UserCard", func(c *render.ComponentContext, data any) error {
+        return RenderUserCard(c, data.(models.User))
+    })
 }
 ```
 
+### Wire it into your app
+
 ```go
-// main.go
 package main
 
 import (
@@ -174,52 +211,46 @@ import (
     "github.com/xDarkicex/nanite-render"
     "github.com/xDarkicex/nanite-render/nano"
     "github.com/xDarkicex/nanite-render/engine"
-    "myapp/models"
+    "github.com/xDarkicex/nanite-gsx"
     "myapp/views"
 )
 
 func main() {
+    gsxEngine := gsx.New()
+    views.RegisterUserCard(gsxEngine)
+
     reg := render.New(
-        render.WithEngines(engine.NewJade(), engine.NewHTML()),
+        render.WithEngines(gsxEngine, engine.NewJade()),
         render.WithDefaultLoader(render.NewFileLoader("./layouts", ".jade")),
     )
 
     r := nanite.New()
-    r.Get("/dashboard", func(c *nanite.Context) {
-        user := loadCurrentUser(c)
-        // nano.RenderPage: layout (jade) + view (gsx)
-        if err := nano.RenderPage(c, reg, "layouts/app", "views/dashboard", user); err != nil {
-            c.Error(500, err)
-        }
+    r.Get("/users/:id", func(c *nanite.Context) {
+        user := loadUser(c.Param("id"))
+        nano.RenderPage(c, reg, "layouts/app", "UserCard", user)
     })
     r.Start(":3000")
 }
 ```
 
-### HTMX partial swap with server actions
+---
 
-```gsx
-// views/like_button.gsx
-@import "myapp/models"
+## Composition examples
 
-func LikeButton(post models.Post) {
-    <button
-        hx-post="/_nano/action/LikeButton/toggle"
-        hx-swap="outerHTML"
-        class="like-btn">
-        {post.Likes} likes
-    </button>
-}
-```
+### Dual-path execution
 
-```go
-// registered via the nanite compilation target, then mounted:
-r.Post("/_nano/action/*", reg.HandleAction)
-```
+Every `.gsx` component has two dispatch paths:
 
-The `.gsx` compiler generates the `func RenderLikeButton(w, post)` — nanite-render's `.Action("toggle", fn)` handles the mutation, re-renders the component, and HTMX swaps it inline. No page reload.
+| Path | Trigger | Cost | Type safety |
+|---|---|---|---|
+| **Internal fast path** | `<UserCard user={u}/>` inside another `.gsx` file | `0 B/op` — direct Go call | `go build` catches mismatches |
+| **External dynamic path** | `reg.RenderNamed("gsx", "UserCard", data)` | ~50ns — map lookup + type assert | Runtime assertion (correct by convention) |
 
-### Layout composition with yield
+Calls between `.gsx` components use the fast path. Cross-engine calls (jade layout → gsx view, handler → gsx component) use the dynamic path. Both are generated from the same source file.
+
+### Full-stack page
+
+Jade layout + gsx view + gsx components — three engines, one page:
 
 ```gsx
 // views/dashboard.gsx
@@ -244,23 +275,149 @@ html
     {{ yield }}
 ```
 
-The layout renders via jade; the view is your `.gsx` component. `NANO_HEAD` emits title/meta tags set during the render. `{{ yield }}` injects the view.
+```go
+// main.go
+gsxEngine := gsx.New()
+views.RegisterDashboard(gsxEngine)
+views.RegisterHeader(gsxEngine)
+views.RegisterStatsGrid(gsxEngine)
+
+reg := render.New(
+    render.WithEngines(gsxEngine, engine.NewJade()),
+    render.WithDefaultLoader(render.NewFileLoader("./layouts", ".jade")),
+)
+
+r := nanite.New()
+r.Get("/dashboard", func(c *nanite.Context) {
+    user := loadCurrentUser(c)
+    nano.RenderPage(c, reg, "layouts/app", "Dashboard", user)
+})
+```
+
+The flow: Jade renders the layout → `{{ yield }}` triggers → `gsx.Engine.Execute` calls `RenderDashboard(c, data)` → `<Header user={user}/>` calls `RenderHeader(c, user)` directly → `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly.
+
+### HTMX partial swap with server actions
+
+```gsx
+// views/like_button.gsx
+@import "myapp/models"
+
+func LikeButton(post models.Post) {
+    <button
+        hx-post={c.ActionURL("toggle")}
+        hx-swap="outerHTML"
+        class="like-btn">
+        {post.Likes} likes
+    </button>
+}
+```
+
+```go
+// Registered via the generated RegisterLikeButton, mounted with:
+r.Post("/_nano/action/*", reg.HandleAction)
+```
+
+The generated code has direct `c.ActionURL` access — no wrapper, no `io.Writer` proxy. The action mutates state, the component re-renders, HTMX swaps it inline. No page reload.
+
+### Composition from a handler
+
+```go
+r.Get("/profile", func(c *nanite.Context) {
+    user := loadUser(c.Param("id"))
+
+    // RenderPage: layout + view composition
+    nano.RenderPage(c, reg, "layouts/app", "Profile", user)
+})
+
+r.Get("/profile/card", func(c *nanite.Context) {
+    user := loadUser(c.Param("id"))
+
+    // RenderNamed: single gsx view, no layout
+    nano.Render(c, reg, "gsx", "ProfileCard", user)
+})
+
+r.Get("/profile/badge", func(c *nanite.Context) {
+    bw := render.AcquireWriter(c)
+    defer render.ReleaseWriter(bw)
+    rc := render.AcquireContext(bw, c.Request)
+    defer render.ReleaseContext(rc)
+
+    // Direct call — fast path, no registry
+    RenderAdminBadge(rc, loadUser(c.Param("id")))
+})
+```
+
+---
+
+## Architecture
+
+### The Engine adapter
+
+`gsx.Engine` implements `render.Engine`. Because `.gsx` views are AOT-compiled, `Compile` is a map lookup — no runtime parsing. The view function is stored on `Program.EngineData`; `Execute` type-asserts and calls it.
+
+```go
+type Engine struct {
+    views map[string]func(c *render.ComponentContext, data any) error
+}
+
+func (e *Engine) Name() string { return "gsx" }
+
+func (e *Engine) Compile(_ []byte, name string) (*render.Program, error) {
+    fn, ok := e.views[name]
+    if !ok { return nil, render.ErrTemplateNotFound }
+    return &render.Program{Engine: "gsx", Name: name, EngineData: fn}, nil
+}
+
+func (e *Engine) Execute(p *render.Program, w render.ByteWriter, rc *render.RenderContext, data any) error {
+    fn := p.EngineData.(func(c *render.ComponentContext, data any) error)
+    return fn(&render.ComponentContext{Writer: w, Context: rc, Data: data}, data)
+}
+```
+
+### Compiler pipeline
+
+```
+.gsx source
+    │
+    ▼
+┌──────────────────────┐
+│  Lexer (SWAR-driven)  │  3 triggers: < { @
+│  internal/lexer/      │  8 bytes/cycle, zero allocs
+└──────────┬───────────┘
+           │  Token stream
+           ▼
+┌──────────────────────┐
+│  Parser               │  Token stream → NodeStream IR
+│  internal/parser/     │  SoA, same pattern as nanite-render
+└──────────┬───────────┘
+           │  NodeStream AST
+           ▼
+┌──────────────────────┐
+│  Code Generator       │  IR → Go source
+│  internal/codegen/    │  ComponentContext target
+│                       │  + RegisterX(e *gsx.Engine)
+└──────────┬───────────┘
+           │  _gsx.go file
+           ▼
+┌──────────────────────┐
+│  go build             │  Type-safe, 0 B/op render
+└──────────────────────┘
+```
 
 ---
 
 ## The `.gsx` file format
 
 ```gsx
-// Optional: ES6-style imports
+// ES6-style imports — compiled to Go import blocks
 @import "time"
 @import { User, Post } from "myapp/models"
 @import db "myapp/database"
 
-// The component — one function per file
-// @component (optional — inferred from func keyword)
-func UserCard(user User, showEmail bool) error {
-    // Everything from { onwards is GSX HTML mode
-
+// One component per file.
+// The compiler injects c *render.ComponentContext as the first param.
+// Props are typed — go build catches mismatches.
+func UserCard(user User, showEmail bool) {
     // { expr } — Go expression, HTML-escaped
     <h3>{user.Name}</h3>
 
@@ -278,120 +435,47 @@ func UserCard(user User, showEmail bool) error {
         }
     </ul>
 
-    // Capital-letter tags → direct Go function calls
+    // Capital tags → direct Go function calls (fast path)
     <Avatar user={user} size="lg" />
-
-    // Self-closing and HTML tags work as expected
-    <br/>
-    <img src={user.AvatarURL} alt="avatar"/>
 }
 ```
 
-**Three lexer triggers** make parsing deterministic and fast:
+**Three lexer triggers:**
 
 | Trigger | Mode | What happens |
 |---|---|---|
-| `<` | Tag mode | Uppercase = component call (`<UserCard/>`), lowercase = HTML (`<div>`) |
-| `{` | Expression mode | Balanced-brace Go expression, HTML-escaped in output |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@component` |
+| `<` | Tag mode | Uppercase = component call, lowercase = HTML |
+| `{` | Expression mode | Balanced-brace Go expression, HTML-escaped |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import` |
 
-**Imports** — three forms, all compiled to standard Go `import` blocks:
+**Imports — compiled to standard Go:**
 
 | .gsx syntax | Generated Go |
 |---|---|
 | `@import "time"` | `import _ "time"` |
 | `@import models "myapp/models"` | `import models "myapp/models"` |
-| `@import { User, Post } from "myapp/models"` | `import __gsx_pkg1 "myapp/models"` + `type User = __gsx_pkg1.User` |
-
----
-
-## Compilation targets
-
-### Standalone (`--target=standalone`)
-
-Generates pure Go — no dependencies on nanite-render. Works with any `io.Writer`:
-
-```go
-func RenderUserCard(w io.Writer, user models.User) error {
-    w.Write([]byte(`<div class="user-card"><h3>`))
-    io.WriteString(w, html.EscapeString(user.Name))
-    w.Write([]byte(`</h3></div>`))
-    return nil
-}
-```
-
-### Nanite (`--target=nanite`)
-
-Generates the standalone function **plus** automatic nanite-render component registration:
-
-```go
-func init() {
-    render.DefaultRegistry.Define("UserCard").
-        Render(func(c *render.ComponentContext) error {
-            props := render.BindProps[UserCardProps](c.Data)
-            return RenderUserCard(c.Writer, props)
-        }).
-        Register(render.DefaultRegistry)
-}
-```
-
-Components are addressable by name from templates, `c.Render("UserCard", ...)`, and the SoA executor.
-
----
-
-## Architecture
-
-```
-.gsx source
-    │
-    ▼
-┌──────────────────────┐
-│  Lexer (SWAR-driven)  │  3 triggers: < { @
-│  internal/lexer/      │  Proven byte-scanning from xDarkicex/lexer
-└──────────┬───────────┘
-           │  Token stream
-           ▼
-┌──────────────────────┐
-│  Parser               │  Token stream → NodeStream IR
-│  internal/parser/     │  Structure-of-Arrays, like nanite-render
-└──────────┬───────────┘
-           │  NodeStream AST
-           ▼
-┌──────────────────────┐
-│  Code Generator       │  IR → Go source
-│  internal/codegen/    │  Recursive walker, consumed-count propagation
-└──────────┬───────────┘
-           │  .go file
-           ▼
-┌──────────────────────┐
-│  go build             │  Standard Go compilation
-│  (pure, zero deps)    │  0 B/op on the render path
-└──────────────────────┘
-```
-
-The lexer reuses SWAR primitives from [xDarkicex/lexer](https://github.com/xDarkicex/lexer) — 8 bytes per cycle byte scanning with no allocations. The parser produces a flat `NodeStream` (same structural pattern as nanite-render's SoA executor). The code generator walks it depth-first with recursive consumed-count propagation — no node is ever emitted twice.
+| `@import { User, Post } from "myapp/models"` | `import pkg "myapp/models"` + `type User = pkg.User` |
 
 ---
 
 ## Status
 
-Alpha. The prototype pipeline passes end-to-end: `.gsx` source → lexer → parser → IR → Go code. Supported syntax:
+Alpha. The prototype pipeline is complete:
 
-- [x] Static HTML
-- [x] `{ Go expressions }` — HTML-escaped
-- [x] `@if` / `@else`
-- [x] `@for`
-- [x] `<CapitalComponent prop={val} />`
-- [x] `@import` directives (3 forms)
-- [x] Standalone compilation target
-- [ ] Nanite compilation target
+- [x] Lexer (3-trigger state machine, block-detection in `scanExpr`)
+- [x] Parser (`@import`, func signature, template body, `@if`/`@for`)
+- [x] Codegen (`*render.ComponentContext` target, `RegisterX` wrapper)
+- [x] `gsx.Engine` implementing `render.Engine`
+- [x] Direct component calls (`<Card/>` → `RenderCard(c, props)`)
+- [x] `@import` (3 forms)
+- [ ] `gsx compile` CLI
 - [ ] `@switch` / `@case`
 - [ ] Attribute expression values (`class={expr}`)
-- [ ] VS Code extension
 - [ ] `gsx watch` (hot reload)
+- [ ] VS Code extension
 
 ---
 
 ## License
 
-MIT
+MIT © 2026 xDarkicex
