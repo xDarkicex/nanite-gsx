@@ -236,6 +236,93 @@ func TestE2E_Switch(t *testing.T) {
 	t.Logf("\nGenerated output:\n%s", got)
 }
 
+// TestE2E_ActionAndAssets verifies @action and @css/@js codegen.
+func TestE2E_ActionAndAssets(t *testing.T) {
+	src := `@css "/static/css/user-card.css"
+@js "/static/js/chart-init.js"
+
+@action toggleAdmin(rc *render.RenderContext, props map[string]any) error {
+    return db.Exec("UPDATE users SET admin = NOT admin WHERE id = ?", props["id"])
+}
+
+func UserCard(user models.User) {
+    <div class="card">
+        <h3>{user.Name}</h3>
+        <button hx-post={c.ActionURL("toggleAdmin")}>Toggle Admin</button>
+    </div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	if len(parsed.CSSAssets) != 1 || parsed.CSSAssets[0] != "/static/css/user-card.css" {
+		t.Errorf("css assets = %v", parsed.CSSAssets)
+	}
+	if len(parsed.JSAssets) != 1 || parsed.JSAssets[0] != "/static/js/chart-init.js" {
+		t.Errorf("js assets = %v", parsed.JSAssets)
+	}
+	if len(parsed.Actions) != 1 || parsed.Actions[0].Name != "toggleAdmin" {
+		t.Errorf("actions = %+v", parsed.Actions)
+	}
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		`c.RequiresCSS("/static/css/user-card.css")`,
+		`c.RequiresJS("/static/js/chart-init.js")`,
+		`.Action("toggleAdmin", func(rc *render.RenderContext, props map[string]any) error {`,
+		`return db.Exec("UPDATE users SET admin = NOT admin WHERE id = ?", props["id"])`,
+		"func RegisterUserCardComponent",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_MultiParam verifies multi-param components generate a
+// props struct + BindProps bridge for dynamic registration.
+func TestE2E_MultiParam(t *testing.T) {
+	src := `func UserCard(user models.User, showEmail bool) {
+    <h3>{user.Name}</h3>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		"type UserCardProps struct {",
+		"User models.User `nanite:\"user\"`",
+		"ShowEmail bool `nanite:\"showEmail\"`",
+		"render.BindProps[UserCardProps](data)",
+		"return RenderUserCard(c, props.User, props.ShowEmail, nil)",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

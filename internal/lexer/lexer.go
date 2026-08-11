@@ -44,6 +44,11 @@ const (
 	KindAtAsync   // @async
 	KindAtFallback // @fallback(ComponentName)
 
+	// Asset directives.
+	KindAtCSS     // @css "/path"
+	KindAtJS      // @js "/path"
+	KindAtAction  // @action name(rc, props) error { ... }
+
 	KindColon     // :
 )
 
@@ -359,6 +364,12 @@ func (s *Scanner) scanAtDirective() Token {
 		return Token{Kind: KindAtAsync, Start: start, End: s.pos}
 	case "fallback":
 		return Token{Kind: KindAtFallback, Start: start, End: s.pos}
+	case "css":
+		return Token{Kind: KindAtCSS, Start: start, End: s.pos}
+	case "js":
+		return Token{Kind: KindAtJS, Start: start, End: s.pos}
+	case "action":
+		return Token{Kind: KindAtAction, Start: start, End: s.pos}
 	case "import":
 		return Token{Kind: KindAtImport, Start: start, End: s.pos}
 	default:

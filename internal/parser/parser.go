@@ -32,6 +32,11 @@ type ParsedFile struct {
 	FallbackOf string // @fallback(UserProfile) → this func is the fallback
 	Fallback   string // resolved: the FuncName of the fallback func
 
+	// Colocated server actions and asset directives.
+	Actions    []Action // @action name(rc, props) error { ... }
+	CSSAssets  []string // @css "/path"
+	JSAssets   []string // @js "/path"
+
 	HasComponents bool // true if body contains <CapitalComponent/>
 	Body          ir.NodeStream
 }
@@ -66,6 +71,8 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 	var out []*ParsedFile
 	var imports []Import
 	var pending Decorators
+	var pendingCSS, pendingJS []string
+	var pendingActions []Action
 
 	for {
 		tok := p.scanner.Scan()
@@ -82,12 +89,38 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 				return nil, err
 			}
 			pending = append(pending, dec)
+		case lexer.KindAtCSS, lexer.KindAtJS:
+			// @css "/path" / @js "/path" — attach to the NEXT
+			// func declaration.
+			s := p.scanner.Scan()
+			if s.Kind != lexer.KindString {
+				return nil, fmt.Errorf("expected string after %s", tok.String(p.src))
+			}
+			path := unquote(s, p.src)
+			if tok.Kind == lexer.KindAtCSS {
+				pendingCSS = append(pendingCSS, path)
+			} else {
+				pendingJS = append(pendingJS, path)
+			}
+		case lexer.KindAtAction:
+			act, err := p.parseAction()
+			if err != nil {
+				return nil, err
+			}
+			pendingActions = append(pendingActions, act)
 		case lexer.KindFunc:
-			f := &ParsedFile{Imports: imports}
+			f := &ParsedFile{
+				Imports:   imports,
+				CSSAssets: pendingCSS,
+				JSAssets:  pendingJS,
+				Actions:   pendingActions,
+			}
 			for _, d := range pending {
 				d.apply(f)
 			}
 			pending = nil
+			pendingCSS, pendingJS = nil, nil
+			pendingActions = nil
 			if err := p.parseSignature(f); err != nil {
 				return nil, err
 			}
@@ -125,6 +158,15 @@ func resolveFallbacks(files []*ParsedFile) {
 	}
 }
 
+// Action is a colocated server action: Go mutation logic that
+// lives next to the component. Hoisted into the fluent builder's
+// .Action(name, fn) at registration.
+type Action struct {
+	Name string // "toggleAdmin"
+	Sig  string // the params between parens, verbatim
+	Body string // the raw Go body between braces
+}
+
 // Decorators are @-directives that precede a func declaration
 // and wire the component into nanite-render lifecycles.
 type Decorators []Decorator
@@ -144,6 +186,104 @@ func (d Decorator) apply(f *ParsedFile) {
 	case "fallback":
 		f.FallbackOf = d.Value
 	}
+}
+
+// parseAction reads @action name(sig) { body }. The signature
+// and body are captured as raw Go text (verbatim).
+func (p *parser) parseAction() (Action, error) {
+	var act Action
+
+	// name
+	tok := p.scanner.Scan()
+	if tok.Kind != lexer.KindIdent {
+		return act, fmt.Errorf("expected action name after @action")
+	}
+	act.Name = tok.String(p.src)
+
+	// signature: read raw bytes from ( to the matching )
+	depth := 0
+	var sig strings.Builder
+	for {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return act, fmt.Errorf("unexpected EOF in @action signature")
+		}
+		switch b {
+		case '(':
+			depth++
+			if depth > 1 {
+				sig.WriteByte(b)
+			}
+		case ')':
+			depth--
+			if depth == 0 {
+				goto sigDone
+			}
+			sig.WriteByte(b)
+		default:
+			sig.WriteByte(b)
+		}
+	}
+sigDone:
+	act.Sig = strings.TrimSpace(sig.String())
+
+	// Skip return type (error) and whitespace to the {.
+	for {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return act, fmt.Errorf("unexpected EOF before @action body")
+		}
+		if b == '{' {
+			break
+		}
+	}
+
+	// Body: brace-counted raw Go.
+	depth = 1
+	var body strings.Builder
+	for depth > 0 {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return act, fmt.Errorf("unexpected EOF in @action body")
+		}
+		switch b {
+		case '{':
+			depth++
+			body.WriteByte(b)
+		case '}':
+			depth--
+			if depth == 0 {
+				goto bodyDone
+			}
+			body.WriteByte(b)
+		case '"', '\'', '`':
+			body.WriteByte(b)
+			// Skip the string contents.
+			for {
+				c := p.scanner.NextByte()
+				if c == 0 {
+					return act, fmt.Errorf("unexpected EOF in @action string")
+				}
+				body.WriteByte(c)
+				if c == '\\' {
+					e := p.scanner.NextByte()
+					if e == 0 {
+						return act, fmt.Errorf("unexpected EOF in @action string escape")
+					}
+					body.WriteByte(e)
+					continue
+				}
+				if c == b {
+					break
+				}
+			}
+		default:
+			body.WriteByte(b)
+		}
+	}
+bodyDone:
+	act.Body = body.String()
+	return act, nil
 }
 
 func (p *parser) parseDecorator(tok lexer.Token) (Decorator, error) {

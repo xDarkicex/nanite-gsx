@@ -106,6 +106,28 @@ func (g *generator) emitHeader() {
 		}
 	}
 
+	// Multi-param components get a generated props struct so the
+	// dynamic registration can BindProps the any payload.
+	if len(p.Params) > 1 {
+		g.line("")
+		g.linef("type %sProps struct {", p.FuncName)
+		g.indent++
+		for _, param := range p.Params {
+			fields := strings.Fields(param)
+			if len(fields) < 2 {
+				continue
+			}
+			// "user models.User" → Name "user", Type "models.User".
+			name := fields[0]
+			typ := fields[len(fields)-1]
+			exported := strings.ToUpper(name[:1]) + name[1:]
+			g.linef("%s %s `nanite:%q`", exported, typ, name)
+		}
+		g.indent--
+		g.line("}")
+		g.line("")
+	}
+
 	// The strongly-typed render function. Children closure is always
 	// the last param — callers pass nil when there are no children.
 	params := append([]string{"c *render.ComponentContext"}, p.Params...)
@@ -114,6 +136,14 @@ func (g *generator) emitHeader() {
 	g.line("")
 	g.linef("func Render%s(%s) %s {", p.FuncName, strings.Join(params, ", "), returns)
 	g.indent = 1
+
+	// @css / @js — asset dependencies as the first lines.
+	for _, href := range p.CSSAssets {
+		g.linef("c.RequiresCSS(%q)", href)
+	}
+	for _, src := range p.JSAssets {
+		g.linef("c.RequiresJS(%q)", src)
+	}
 }
 
 func (g *generator) emitFooter() {
@@ -129,7 +159,10 @@ func (g *generator) emitFooter() {
 	g.indent = 1
 	g.linef(`e.Register(%q, func(c *render.ComponentContext, data any) error {`, p.FuncName)
 
-	args := g.registrationArgs()
+	prelude, args := g.registrationArgs()
+	for _, stmt := range prelude {
+		g.line(stmt)
+	}
 	g.linef("return Render%s(c, %s)", p.FuncName, strings.Join(args, ", "))
 
 	g.indent = 1
@@ -138,12 +171,13 @@ func (g *generator) emitFooter() {
 	g.line("}")
 	g.line("")
 
-	// Decorator path: if @oob/@async were declared, also emit the
-	// component registration via nanite-render's fluent builder —
-	// this wires Suspense, OOB swaps, and fallbacks into the
-	// ComponentRegistry so templates can dispatch <UserProfile/>
-	// and inherit the lifecycles.
-	if p.OOBID != "" || p.Async {
+	// Decorator/action path: if any lifecycle decorator OR a
+	// colocated action exists, also emit the component
+	// registration via nanite-render's fluent builder — this
+	// wires Suspense, OOB swaps, fallbacks, and server actions
+	// into the ComponentRegistry so templates can dispatch
+	// <UserProfile/> and inherit the lifecycles.
+	if p.OOBID != "" || p.Async || len(p.Actions) > 0 {
 		g.emitDecoratedRegistration()
 	}
 }
@@ -166,14 +200,25 @@ func (g *generator) emitDecoratedRegistration() {
 	if p.Fallback != "" {
 		chain += fmt.Sprintf(".Fallback(func(c *render.ComponentContext) error { return Render%s(c, nil) })", p.Fallback)
 	}
+	// Colocated server actions — @action blocks hoisted into the
+	// fluent builder chain.
+	for _, a := range p.Actions {
+		chain += fmt.Sprintf(".Action(%q, func(%s) error {\n%s\n\t\t})", a.Name, a.Sig, a.Body)
+	}
 	g.linef("%s.Render(func(c *render.ComponentContext) error {", chain)
 	g.indent++
 	// The Render closure receives c *ComponentContext — data is on c.Data.
-	args := g.registrationArgs()
+	prelude, args := g.registrationArgs()
 	// registrationArgs emits data.(Type); in the registry path the
 	// data is c.Data.
+	for i := range prelude {
+		prelude[i] = strings.Replace(prelude[i], "data", "c.Data", 1)
+	}
 	for i := range args {
 		args[i] = strings.Replace(args[i], "data.", "c.Data.", 1)
+	}
+	for _, stmt := range prelude {
+		g.line(stmt)
 	}
 	g.linef("return Render%s(c, %s)", p.FuncName, strings.Join(args, ", "))
 	g.indent--
@@ -335,23 +380,39 @@ func (g *generator) emitIf(i int) (int, error) {
 
 // registrationArgs builds the argument list for the engine
 // registration wrapper. The render signature is
-// (c, p1..pN, children) — so N params produce N+1 args:
-// N type-asserted data args + nil children.
-func (g *generator) registrationArgs() []string {
+// (c, p1..pN, children) — so N params produce N+1 args.
+//
+// Single param: data.(Type) — direct assertion, zero cost.
+// Multi param: BindProps[GeneratedProps](data) — the generated
+// props struct bridges the any payload to the typed params.
+// Zero params: just the nil children closure.
+//
+// Returns (prelude, args) — prelude are statements emitted
+// before the call (the props binding for multi-param).
+func (g *generator) registrationArgs() (prelude, args []string) {
 	p := g.parsed
-	var args []string
-	if len(p.Params) > 0 {
-		// Param format: "name Type" or "name, name2 Type" (grouped).
-		// Take the type from the first param.
-		first := p.Params[0]
-		fields := strings.Fields(first)
+	switch {
+	case len(p.Params) > 1:
+		// BindProps path — the generated XProps struct.
+		prelude = append(prelude, fmt.Sprintf("props := render.BindProps[%sProps](data)", p.FuncName))
+		for _, param := range p.Params {
+			fields := strings.Fields(param)
+			if len(fields) < 2 {
+				continue
+			}
+			name := fields[0]
+			exported := strings.ToUpper(name[:1]) + name[1:]
+			args = append(args, fmt.Sprintf("props.%s", exported))
+		}
+	case len(p.Params) == 1:
+		fields := strings.Fields(p.Params[0])
 		if len(fields) > 0 {
 			typ := fields[len(fields)-1]
 			args = append(args, fmt.Sprintf("data.(%s)", typ))
 		}
 	}
 	args = append(args, "nil") // children closure
-	return args
+	return prelude, args
 }
 
 func (g *generator) emitOpenTag(i int) {
