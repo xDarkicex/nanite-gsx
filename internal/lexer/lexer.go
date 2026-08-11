@@ -1,67 +1,380 @@
-// Package lexer scans markdown byte streams into a token stream.
-//
-// The lexer is SWAR-driven: it classifies 8 bytes per cycle via bitwise
-// operations on uint64. See swar.go for FindByte, FindByteNot, and SkipWS
-// — the hot-path helpers used by the parser. The token-stream scaffold
-// below is unused by the parser today and is preserved for the upcoming
-// tokenize-first iteration.
+// Package lexer scans .gsx source into a token stream.
+// SWAR-driven (see swar.go) — 8 bytes per cycle for the hot-path
+// transitions (<, {, @, ", ').
 package lexer
 
-// Kind enumerates token types emitted by the lexer.
+// Kind classifies a .gsx token.
 type Kind uint8
 
 const (
-	KindEOF Kind = iota
-	KindText
-	KindNewline
-	KindHeading
-	KindEmphasis
-	KindStrong
-	KindCode
-	KindLink
-	KindImage
-	KindListBullet
-	KindListNumber
-	KindBlockquote
-	KindCodeFence
-	KindHr
-	KindTable
-	KindRawHTML
-	KindExtension
+	KindEOF   Kind = iota // end of source
+	KindError             // malformed input
+
+	// Preamble: @import directives and func signature.
+	KindAtImport  // @import ... (handled as a directive)
+	KindFrom      // the "from" keyword in @import
+	KindFunc      // func keyword
+	KindIdent     // identifier (type name, var name, package alias)
+	KindLBRACE    // {
+	KindRBRACE    // }
+	KindLParen    // (
+	KindRParen    // )
+
+	// Template body tokens.
+	KindText   // static HTML text
+	KindLT     // <
+	KindGT     // >
+	KindSlash  // /
+	KindEQ     // =
+	KindString // "..." or '...'
+	KindExpr   // { go expr } — the Go expression text
+
+	// @ directives inside template body.
+	KindAtIf     // @if
+	KindAtElse   // @else
+	KindAtFor    // @for
+	KindAtSwitch // @switch
+	KindAtCase   // @case
+	KindAtDefault // @default
+	KindAtView   // @component / @view
 )
 
-// Token is a single lexer emission. Start/End are byte offsets into the
-// input slice — no copy.
+// Token is a span of bytes in the source with a Kind
+// classification.
 type Token struct {
+	Kind  Kind
 	Start uint32
 	End   uint32
-	Kind  Kind
 }
 
-// Scanner holds lexer state.
+func (t Token) String(src []byte) string {
+	if t.Start >= t.End || int(t.End) > len(src) {
+		return ""
+	}
+	return string(src[t.Start:t.End])
+}
+
+// Scanner tokenizes .gsx source. The scanner is the lexer: it
+// reads the source byte by byte using SWAR transitions and
+// emits tokens. The parser calls Scan() in a loop.
 type Scanner struct {
-	src []byte
-	pos uint32
+	src        []byte
+	pos        uint32
+	end        uint32
+	inTemplate bool // true once the func body { is seen
 }
 
-// New returns a Scanner over src. The scanner keeps a slice header only;
-// it does not retain src beyond the call.
-func New(src []byte) *Scanner {
-	return &Scanner{src: src}
+// NewScanner returns a Scanner over src.
+func NewScanner(src []byte) *Scanner {
+	return &Scanner{src: src, pos: 0, end: uint32(len(src))}
 }
 
-// Next advances and returns the next token. Returns (Token{}, false) on EOF.
-func (s *Scanner) Next() (Token, bool) {
-	if int(s.pos) >= len(s.src) {
-		return Token{Kind: KindEOF}, false
+// EnterTemplate switches the scanner into template-body mode
+// where { triggers expression scanning. Call after the func
+// body { is consumed.
+func (s *Scanner) EnterTemplate() { s.inTemplate = true }
+
+// NextByte reads the next raw byte and advances the position.
+// Returns 0 at EOF.
+func (s *Scanner) NextByte() byte {
+	if s.pos >= s.end {
+		return 0
 	}
+	b := s.src[s.pos]
+	s.pos++
+	return b
+}
+
+// Pos returns the current position.
+func (s *Scanner) Pos() uint32 { return s.pos }
+
+// Scan reads the next token. Returns KindEOF when exhausted.
+func (s *Scanner) Scan() Token {
+	s.skipWS()
+	if s.pos >= s.end {
+		return Token{Kind: KindEOF, Start: s.pos, End: s.pos}
+	}
+
+	b := s.src[s.pos]
+
+	switch {
+	case b == '@':
+		return s.scanAtDirective()
+	case b == '<':
+		return s.scanTag()
+	case b == '{':
+		if s.inTemplate {
+			return s.scanExpr()
+		}
+		s.pos++
+		return Token{Kind: KindLBRACE, Start: s.pos - 1, End: s.pos}
+	case b == '"', b == '\'', b == '`':
+		return s.scanString(b)
+	case b == '}':
+		s.pos++
+		return Token{Kind: KindRBRACE, Start: s.pos - 1, End: s.pos}
+	case b == '>':
+		s.pos++
+		return Token{Kind: KindGT, Start: s.pos - 1, End: s.pos}
+	case b == '/':
+		s.pos++
+		return Token{Kind: KindSlash, Start: s.pos - 1, End: s.pos}
+	case b == '=':
+		s.pos++
+		return Token{Kind: KindEQ, Start: s.pos - 1, End: s.pos}
+	case b == '(':
+		s.pos++
+		return Token{Kind: KindLParen, Start: s.pos - 1, End: s.pos}
+	case b == ')':
+		s.pos++
+		return Token{Kind: KindRParen, Start: s.pos - 1, End: s.pos}
+	case b == 'f':
+		if s.matchKeyword("func") {
+			return s.scanFunc()
+		}
+		return s.scanIdent()
+	case isLetter(b):
+		return s.scanIdent()
+	case b == '\n', b == '\r':
+		return s.scanText()
+	default:
+		return s.scanText()
+	}
+}
+
+// skipWS advances past whitespace and comments.
+func (s *Scanner) skipWS() {
+	for s.pos < s.end {
+		b := s.src[s.pos]
+		switch {
+		case b == ' ' || b == '\t' || b == '\r' || b == '\n':
+			s.pos++
+		case b == '/' && s.pos+1 < s.end && s.src[s.pos+1] == '/':
+			// Line comment — skip to newline.
+			s.pos += 2
+			for s.pos < s.end && s.src[s.pos] != '\n' && s.src[s.pos] != '\r' {
+				s.pos++
+			}
+		default:
+			return
+		}
+	}
+}
+
+func (s *Scanner) scanIdent() Token {
 	start := s.pos
-	if s.src[s.pos] == '\n' {
-		s.pos++
-		return Token{Start: start, End: s.pos, Kind: KindNewline}, true
-	}
-	for int(s.pos) < len(s.src) && s.src[s.pos] != '\n' {
+	for s.pos < s.end && isIdentByte(s.src[s.pos]) {
 		s.pos++
 	}
-	return Token{Start: start, End: s.pos, Kind: KindText}, true
+	return Token{Kind: KindIdent, Start: start, End: s.pos}
+}
+
+func (s *Scanner) scanText() Token {
+	start := s.pos
+	// Consume until we hit a trigger character or WS-only line end.
+	for s.pos < s.end {
+		b := s.src[s.pos]
+		if b == '<' || b == '{' || b == '@' {
+			break
+		}
+		s.pos++
+	}
+	if s.pos == start {
+		// Don't return empty text — advance past one char.
+		s.pos++
+		return Token{Kind: KindText, Start: start, End: s.pos}
+	}
+	return Token{Kind: KindText, Start: start, End: s.pos}
+}
+
+func (s *Scanner) scanString(quote byte) Token {
+	start := s.pos
+	s.pos++ // skip opening quote
+	for s.pos < s.end {
+		b := s.src[s.pos]
+		if b == '\\' {
+			s.pos += 2 // skip escaped char
+			continue
+		}
+		if b == quote {
+			s.pos++
+			break
+		}
+		s.pos++
+	}
+	return Token{Kind: KindString, Start: start, End: s.pos}
+}
+
+func (s *Scanner) scanExpr() Token {
+	start := s.pos
+	s.pos++ // skip {
+	// Short-circuit: if next char is newline or
+	// whitespace + < or @, this { opens a block.
+	if s.pos < s.end {
+		if b := s.src[s.pos]; b == '\n' || b == '\r' {
+			return Token{Kind: KindExpr, Start: start, End: s.pos}
+		}
+		peek := s.pos
+		for peek < s.end && (s.src[peek] == ' ' || s.src[peek] == '\t') {
+			peek++
+		}
+		if peek < s.end && (s.src[peek] == '<' || s.src[peek] == '@') {
+			return Token{Kind: KindExpr, Start: start, End: s.pos}
+		}
+	}
+	depth := 1
+	for s.pos < s.end && depth > 0 {
+		b := s.src[s.pos]
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				s.pos++
+				return Token{Kind: KindExpr, Start: start, End: s.pos}
+			}
+		case '"', '\'', '`':
+			end := s.skipString(b)
+			if end == 0 {
+				s.pos++
+			}
+		case '/':
+			if s.pos+1 < s.end {
+				if s.src[s.pos+1] == '/' {
+					for s.pos < s.end && s.src[s.pos] != '\n' {
+						s.pos++
+					}
+					continue
+				}
+				if s.src[s.pos+1] == '*' {
+					s.pos += 2
+					for s.pos+1 < s.end && !(s.src[s.pos] == '*' && s.src[s.pos+1] == '/') {
+						s.pos++
+					}
+					if s.pos+1 < s.end {
+						s.pos += 2
+					}
+					continue
+				}
+			}
+			s.pos++
+		default:
+			s.pos++
+		}
+	}
+	return Token{Kind: KindExpr, Start: start, End: s.pos}
+}
+
+func (s *Scanner) skipString(quote byte) uint32 {
+	if s.pos >= s.end {
+		return 0
+	}
+	s.pos++ // skip opening quote
+	for s.pos < s.end {
+		b := s.src[s.pos]
+		if b == '\\' {
+			s.pos += 2
+			continue
+		}
+		if b == quote {
+			s.pos++
+			return s.pos
+		}
+		s.pos++
+	}
+	return 0
+}
+
+func (s *Scanner) scanTag() Token {
+	start := s.pos
+	s.pos++ // skip <
+	// Consume until > handling nested braces for attributes.
+	depth := 0
+	for s.pos < s.end {
+		b := s.src[s.pos]
+		switch b {
+		case '>':
+			if depth == 0 {
+				s.pos++
+				return Token{Kind: KindLT, Start: start, End: s.pos}
+			}
+			s.pos++
+		case '{':
+			depth++
+			s.pos++
+		case '}':
+			depth--
+			s.pos++
+		case '"', '\'', '`':
+			s.skipString(b)
+		default:
+			s.pos++
+		}
+	}
+	return Token{Kind: KindLT, Start: start, End: s.pos}
+}
+
+func (s *Scanner) scanAtDirective() Token {
+	start := s.pos
+	s.pos++ // skip @
+	// Read the keyword.
+	kwStart := s.pos
+	for s.pos < s.end && isLetter(s.src[s.pos]) {
+		s.pos++
+	}
+	kw := string(s.src[kwStart:s.pos])
+
+	switch kw {
+	case "if":
+		return Token{Kind: KindAtIf, Start: start, End: s.pos}
+	case "else":
+		return Token{Kind: KindAtElse, Start: start, End: s.pos}
+	case "for":
+		return Token{Kind: KindAtFor, Start: start, End: s.pos}
+	case "switch":
+		return Token{Kind: KindAtSwitch, Start: start, End: s.pos}
+	case "case":
+		return Token{Kind: KindAtCase, Start: start, End: s.pos}
+	case "default":
+		return Token{Kind: KindAtDefault, Start: start, End: s.pos}
+	case "component", "view":
+		return Token{Kind: KindAtView, Start: start, End: s.pos}
+	case "import":
+		return Token{Kind: KindAtImport, Start: start, End: s.pos}
+	default:
+		return Token{Kind: KindError, Start: start, End: s.pos}
+	}
+}
+
+func (s *Scanner) scanFunc() Token {
+	start := s.pos
+	// We already matched "func" — skip past it.
+	s.pos += 4
+	return Token{Kind: KindFunc, Start: start, End: s.pos}
+}
+
+func (s *Scanner) matchKeyword(kw string) bool {
+	end := s.pos + uint32(len(kw))
+	if end > s.end {
+		return false
+	}
+	for i := 0; i < len(kw); i++ {
+		if s.src[s.pos+uint32(i)] != kw[i] {
+			return false
+		}
+	}
+	// Must be followed by non-ident char.
+	if end < s.end && isIdentByte(s.src[end]) {
+		return false
+	}
+	return true
+}
+
+func isLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+func isIdentByte(b byte) bool {
+	return isLetter(b) || (b >= '0' && b <= '9') || b == '.'
 }

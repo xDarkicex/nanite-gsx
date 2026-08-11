@@ -99,6 +99,15 @@ func (b *Builder) OpenElse() {
 	b.stack = append(b.stack, idx)
 }
 
+// OpenSwitch starts an @switch block.
+func (b *Builder) OpenSwitch(cond string) {
+	idx := len(b.stream.Kind)
+	b.stream.Kind = append(b.stream.Kind, KindSwitch)
+	b.stream.Cond = append(b.stream.Cond, cond)
+	b.addCommonRaw(idx)
+	b.stack = append(b.stack, idx)
+}
+
 // CloseControl closes the innermost control flow block (@if /
 // @else / @for / @switch). Like CloseTag, the close is a no-op
 // node — it doesn't exist in the stream — so we just pop.
