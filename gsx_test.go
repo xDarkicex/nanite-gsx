@@ -472,6 +472,43 @@ func TestE2E_HydrateAndError(t *testing.T) {
 	t.Logf("\nGenerated output:\n%s", got)
 }
 
+// TestE2E_HydrateNested verifies @hydrate handles nested
+// parens, braces, and strings — the old IndexByte hack
+// would stop at the first ) and truncate the expression.
+func TestE2E_HydrateNested(t *testing.T) {
+	src := `func Widget(state map[string]any) {
+    <div @hydrate("x-data", computeValue(state, 42))>
+        <button @hydrate("x-init", func(x int) string { return fmt.Sprintf("ok %d", x) }(5))>
+            Click
+        </button>
+    </div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The expression must survive intact — not truncated at the first ).
+	checks := []string{
+		`c.WriteHydrateProps("x-data", computeValue(state, 42))`,
+		`c.WriteHydrateProps("x-init", func(x int) string { return fmt.Sprintf("ok %d", x) }(5))`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing hydrated expression %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_Alpine verifies @click passthrough, x-data auto-
 // hydration, and x-cloak injection.
 func TestE2E_Alpine(t *testing.T) {

@@ -817,11 +817,41 @@ func parseAttrs(s string) []string {
 		// @hydrate("x-data", state) — server state passed to a
 		// client-side framework (Alpine.js x-data, vanilla JS).
 		if strings.HasPrefix(s, "@hydrate(") {
-			// Find the closing paren.
-			j := strings.IndexByte(s, ')')
-			if j < 0 {
-				break
+			// Walk the args with depth tracking so nested
+			// func calls, map literals, and string contents
+			// don't fool the paren matcher.
+			pDepth := 0 // paren depth
+			bDepth := 0 // brace depth (map/struct literals)
+			j := len("@hydrate(")
+			for j < len(s) {
+				b := s[j]
+				switch b {
+				case '(':
+					pDepth++
+				case ')':
+					if pDepth == 0 && bDepth == 0 {
+						goto hydrateDone
+					}
+					pDepth--
+				case '{':
+					bDepth++
+				case '}':
+					bDepth--
+				case '"', '\'', '`':
+					q := b
+					j++
+					for j < len(s) && s[j] != q {
+						if s[j] == '\\' && j+1 < len(s) {
+							j += 2
+						} else {
+							j++
+						}
+					}
+				}
+				j++
 			}
+			break
+		hydrateDone:
 			args := s[len("@hydrate("):j]
 			parts := strings.SplitN(args, ",", 2)
 			attrName := strings.Trim(strings.TrimSpace(parts[0]), `"'`)
