@@ -145,6 +145,7 @@ nanite ─── nanite-render ─── nanite-gsx
 | `"use server"` mutations | `@action` — colocated mutations, hoisted to `.Action()` |
 | CSS/JS imports | `@css` / `@js` — compiled to `c.RequiresCSS`/`c.RequiresJS`, deduped into `<NANO_ASSETS/>` |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
+| Client islands (Alpine.js) | `@hydrate("x-data", state)` — escaped JSON attribute bridge |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
@@ -182,7 +183,8 @@ func UserCard(user models.User) {
 ### Generate the Go code
 
 ```bash
-gsx compile ./views
+gsx compile ./views        # one-shot compile
+GSX_DEV_MODE=1 gsx watch -dir ./views   # dev server + browser live-reload
 ```
 
 Produces `views/user_card_gsx.go`:
@@ -607,6 +609,58 @@ for __k, __v := range attrs {
 
 Great for HTMX attributes, data-* payloads, and styling maps.
 
+### Client-side interactivity (`@hydrate`)
+
+Pass server state to Alpine.js / vanilla JS securely and without allocations:
+
+```gsx
+func Dropdown(state map[string]any) {
+    <div class="dropdown" @hydrate("x-data", state)>
+        ...
+    </div>
+}
+```
+
+Compiles to `c.WriteHydrateProps("x-data", state)` — the JSON-serialized, HTML-escaped attribute bridge. State goes from Go struct to Alpine's `x-data` in one directive.
+
+### Flash form errors (`@error`)
+
+The `useActionState` validation pattern without the boilerplate:
+
+```gsx
+<form>
+    <input type="email" name="email" />
+    @error("email")
+</form>
+```
+
+Expands to the full `GetFormError` check + error span:
+
+```go
+if __err := c.Context.GetFormError("email"); __err != "" {
+    c.WriteString(`<span class="error">`)
+    c.WriteString(html.EscapeString(__err))
+    c.WriteString(`</span>`)
+}
+```
+
+No more hand-writing the same validation markup on every form field.
+
+### Browser live-reload (`gsx watch`)
+
+The Next.js dev experience. `gsx watch` compiles on save, restarts nothing, and **auto-refreshes the browser**:
+
+```bash
+GSX_DEV_MODE=1 gsx watch -dir ./views
+```
+
+- The compiler injects a tiny SSE script into **layouts** (files with `@yield`) — one connection, no duplication across components
+- The reload server runs on the stack's own **nanite router + nanite/sse Hub** at `:3001/reload` — zero-alloc, dogfooded
+- Every successful recompile broadcasts `reload`; open browser tabs refresh instantly
+
+Save a `.gsx` file → code regenerates → `go build` → browser reloads. No `CMD+R`, no manual restart.
+
+### Composition from a handler
 ### Composition from a handler
 
 ```go
@@ -761,6 +815,13 @@ func UserCard(user User, showEmail bool) {
 
     // @yield — write the view body (layouts)
     <main>@yield</main>
+
+    // @hydrate — server state to client (Alpine.js x-data)
+    <div @hydrate("x-data", dropdownState)>
+
+    // @error — flash form error span
+    <input name="email" />
+    @error("email")
 }
 ```
 
@@ -772,7 +833,8 @@ func UserCard(user User, showEmail bool) {
 |---|---|---|
 | `<` | Tag mode | Uppercase = component call, lowercase = HTML. Non-self-closing collects inner content as children. `{attr}` values become dynamic attributes. |
 | `{` | Expression mode | Balanced-brace Go expression, HTML-escaped. In attribute position (`class={expr}`), emitted as split escaped runtime output. |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@yield`, `@oob`, `@async`, `@fallback`, `@action`, `@css`, `@js` |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@yield`, `@error`, `@oob`, `@async`, `@fallback`, `@action`, `@css`, `@js` |
+| `<div @hydrate(...)>` | Attribute | Server state → client (Alpine.js), compiles to `c.WriteHydrateProps` |
 
 **Imports — compiled to standard Go:**
 
@@ -809,8 +871,10 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] `@yield` layouts (pure gsx — `c.Yield()` composition hook)
 - [x] Fragments (`<>...</>` — zero-byte boundaries)
 - [x] Spread attributes (`{...attrs}` — runtime escaped `key="value"` loop)
+- [x] `@hydrate` (server state → client, Alpine.js bridge)
+- [x] `@error` (flash form error macro)
 - [x] `gsx compile` CLI
-- [x] `gsx watch` (poll-based hot reload)
+- [x] `gsx watch` with browser live-reload (nanite router + nanite/sse Hub)
 - [ ] VS Code extension
 
 ---
