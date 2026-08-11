@@ -136,7 +136,7 @@ nanite ─── nanite-render ─── nanite-gsx
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
-| `<Suspense>` / fallback | `.Async().Fallback(fn)` — streams via HTMX OOB |
+| `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
 | `import { X } from "..."` | `@import { X } from "..."` — ES6-style, compiled to Go aliases |
 
 ---
@@ -184,7 +184,7 @@ import (
     models "myapp/models"
 )
 
-func RenderUserCard(c *render.ComponentContext, user models.User) error {
+func RenderUserCard(c *render.ComponentContext, user models.User, children func(c *render.ComponentContext) error) error {
     c.WriteString(`<div class="user-card"><h3>`)
     c.WriteString(html.EscapeString(fmt.Sprint(user.Name)))
     c.WriteString(`</h3><p>`)
@@ -199,7 +199,7 @@ func RenderUserCard(c *render.ComponentContext, user models.User) error {
 
 func RegisterUserCard(e *gsx.Engine) {
     e.Register("UserCard", func(c *render.ComponentContext, data any) error {
-        return RenderUserCard(c, data.(models.User))
+        return RenderUserCard(c, data.(models.User), nil)
     })
 }
 ```
@@ -281,14 +281,19 @@ html
 ```go
 // main.go
 gsxEngine := gsx.New()
-views.RegisterDashboard(gsxEngine)
+views.RegisterDashboard(gsxEngine)   // engine path (RenderNamed)
 views.RegisterHeader(gsxEngine)
 views.RegisterStatsGrid(gsxEngine)
+
+// Decorated components also register into the ComponentRegistry
+// so templates can dispatch <UserProfile/> with lifecycles.
+views.RegisterUserProfileComponent(cr)
 
 reg := render.New(
     render.WithEngines(gsxEngine, engine.NewJade()),
     render.WithDefaultLoader(render.NewFileLoader("./layouts", ".jade")),
 )
+reg.AttachComponents(cr)
 
 r := nanite.New()
 r.Get("/dashboard", func(c *nanite.Context) {
@@ -297,7 +302,7 @@ r.Get("/dashboard", func(c *nanite.Context) {
 })
 ```
 
-The flow: Jade renders the layout → `{{ yield }}` triggers → `gsx.Engine.Execute` calls `RenderDashboard(c, data)` → `<Header user={user}/>` calls `RenderHeader(c, user)` directly → `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly.
+The flow: Jade renders the layout → `{{ yield }}` triggers → `gsx.Engine.Execute` calls `RenderDashboard(c, data)` → `<Header user={user}/>` calls `RenderHeader(c, user)` directly → `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly. Decorated components reachable by name from jade/plain-HTML templates with their full lifecycle chain (Suspense, OOB, fallbacks) intact.
 
 ### React-style children composition
 
@@ -391,6 +396,54 @@ r.Post("/_nano/action/*", reg.HandleAction)
 ```
 
 The generated code has direct `c.ActionURL` access — no wrapper, no `io.Writer` proxy. The action mutates state, the component re-renders, HTMX swaps it inline. No page reload.
+
+### Lifecycle decorators (Suspense, OOB, fallbacks)
+
+`@oob`, `@async`, and `@fallback` wire the component into nanite-render's advanced lifecycles — right in the template source:
+
+```gsx
+// views/user_profile.gsx
+@import "myapp/models"
+
+@oob "user-profile-slot"
+@async
+func UserProfile(user models.User) {
+    <div class="profile">
+        <h2>{user.Name}</h2>
+        <p>{user.Bio}</p>
+    </div>
+}
+
+@fallback(UserProfile)
+func UserProfileSkeleton() {
+    <div class="skeleton">
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short"></div>
+    </div>
+}
+```
+
+The compiler generates two things:
+
+1. The plain render functions (`RenderUserProfile(c, user)`, `RenderUserProfileSkeleton(c)`) — usable directly
+2. A decorated registration that builds the full fluent chain:
+
+```go
+func RegisterUserProfileComponent(cr *render.ComponentRegistry) {
+    cr.Define("UserProfile").
+        WithOOB("user-profile-slot").
+        Async().
+        Fallback(func(c *render.ComponentContext) error {
+            return RenderUserProfileSkeleton(c, nil)
+        }).
+        Render(func(c *render.ComponentContext) error {
+            return RenderUserProfile(c, c.Data.(models.User), nil)
+        }).
+        Register(cr)
+}
+```
+
+The skeleton renders inline instantly (TTFB ≈ 0ms); the worker goroutine renders the real profile and streams it as an HTMX OOB swap when done. One file, two functions, zero manual wiring.
 
 ### Composition from a handler
 
@@ -487,10 +540,15 @@ func (e *Engine) Execute(p *render.Program, w render.ByteWriter, rc *render.Rend
 @import { User, Post } from "myapp/models"
 @import db "myapp/database"
 
-// One component per file.
-// The compiler injects c *render.ComponentContext as the first param.
-// Props are typed — go build catches mismatches.
+// Lifecycle decorators — wire into nanite-render's Suspense/OOB.
+@oob "card-slot"          // → WithOOB("card-slot")
+@async                    // → Async()
 func UserCard(user User, showEmail bool) {
+    // The compiler injects c *render.ComponentContext as the first
+    // param. Props are typed — go build catches mismatches.
+
+    // { expr } — Go expression, HTML-escaped
+    <h3>{user.Name}</h3>
     // { expr } — Go expression, HTML-escaped
     <h3>{user.Name}</h3>
 
@@ -532,7 +590,7 @@ func UserCard(user User, showEmail bool) {
 |---|---|---|
 | `<` | Tag mode | Uppercase = component call, lowercase = HTML. Non-self-closing collects inner content as children. `{attr}` values become dynamic attributes. |
 | `{` | Expression mode | Balanced-brace Go expression, HTML-escaped. In attribute position (`class={expr}`), emitted as split escaped runtime output. |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children` |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@oob`, `@async`, `@fallback` |
 
 **Imports — compiled to standard Go:**
 
@@ -546,21 +604,22 @@ func UserCard(user User, showEmail bool) {
 
 ## Status
 
-Alpha. The prototype pipeline is complete:
+Beta. The compiler pipeline is complete and generates valid Go:
 
 - [x] Lexer (3-trigger state machine, block-detection in `scanExpr`)
-- [x] Parser (`@import`, func signature, template body, `@if`/`@for`)
+- [x] Parser (multi-func files, `@import`, decorators, `@if`/`@for`/`@switch`)
 - [x] Codegen (`*render.ComponentContext` target, `RegisterX` wrapper)
 - [x] `gsx.Engine` implementing `render.Engine`
 - [x] Direct component calls (`<Card/>` → `RenderCard(c, props)`)
 - [x] `@import` (3 forms)
 - [x] Children closures (`<Layout><Card/></Layout>` + `@children`)
 - [x] Dynamic attributes (`class={expr}` → `html.EscapeString` at runtime)
-- [ ] `gsx compile` CLI
-- [ ] `@switch` / `@case`
-- [ ] Attribute expression values (`class={expr}`)
-- [ ] `gsx watch` (hot reload)
+- [x] Lifecycle decorators (`@oob`, `@async`, `@fallback` → fluent chain)
+- [x] `@switch` / `@case` / `@default`
+- [x] `gsx compile` CLI
+- [x] `gsx watch` (poll-based hot reload)
 - [ ] VS Code extension
+- [ ] Multi-param component registration (v1 asserts the first param)
 
 ---
 
