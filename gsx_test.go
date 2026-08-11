@@ -472,6 +472,38 @@ func TestE2E_HydrateAndError(t *testing.T) {
 	t.Logf("\nGenerated output:\n%s", got)
 }
 
+// TestE2E_Alpine verifies @click passthrough, x-data auto-
+// hydration, and x-cloak injection.
+func TestE2E_Alpine(t *testing.T) {
+	src := `func Dropdown(isOpen bool) {
+    <button @click="open = !open" x-data={map[string]any{"open": isOpen}}>
+        Toggle
+    </button>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		`<style>[x-cloak]{display:none!important}</style>`, // auto-injected
+		`@click`,                                           // Alpine event passthrough
+		`c.WriteHydrateProps("x-data", map[string]any{"open": isOpen})`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

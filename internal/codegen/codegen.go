@@ -110,6 +110,11 @@ func bodyHasExprs(p *parser.ParsedFile) bool {
 		}
 		for k := int(s.AttrStart[i]); k < int(s.AttrEnd[i]); k++ {
 			if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
+				// x-data/x-init auto-hydrate via WriteHydrateProps —
+				// no fmt/html needed.
+				if s.AttrKeys[k] == "x-data" || s.AttrKeys[k] == "x-init" {
+					continue
+				}
 				return true
 			}
 			if k < len(s.AttrSpread) && s.AttrSpread[k] {
@@ -233,12 +238,38 @@ func (g *generator) emitHeader() {
 		g.linef("c.RequiresJS(%q)", src)
 	}
 
+	// Alpine x-cloak: if the component uses any x- or @ attribute,
+	// inject the anti-flicker CSS rule so the UI is hidden until
+	// Alpine initializes. Inline style, idempotent.
+	if bodyUsesAlpine(p) {
+		g.line(`c.WriteString(` + "`" + xCloakStyle + "`" + `)`)
+	}
+
 	// GSX_DEV_MODE: inject the live-reload script into layouts
 	// (files with @yield) so the browser auto-refreshes on
 	// recompile. One connection, one reload directive.
 	if isDevMode() && bodyHasYield(p) {
 		g.line(`c.WriteString(` + "`" + devReloadScript + "`" + `)`)
 	}
+}
+
+// xCloakStyle hides Alpine-managed elements until Alpine loads.
+const xCloakStyle = `<style>[x-cloak]{display:none!important}</style>`
+
+// bodyUsesAlpine reports whether the body has any attribute
+// starting with x- (Alpine data/bind/show) or @ (Alpine events) —
+// the signal to inject x-cloak.
+func bodyUsesAlpine(p *parser.ParsedFile) bool {
+	s := p.Body
+	for i := 0; i < s.Count; i++ {
+		for k := int(s.AttrStart[i]); k < int(s.AttrEnd[i]); k++ {
+			key := s.AttrKeys[k]
+			if strings.HasPrefix(key, "x-") || strings.HasPrefix(key, "@") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // devReloadScript connects to the gsx watch SSE server and
@@ -593,6 +624,13 @@ func (g *generator) emitOpenTag(i int) {
 			g.indent--
 			g.line("}")
 		case k < len(s.AttrDynamic) && s.AttrDynamic[k]:
+			// Alpine x-data / x-init with a Go expression:
+			// auto-convert to the JSON hydration bridge —
+			// fmt.Sprint of a Go map is NOT valid Alpine JS.
+			if key == "x-data" || key == "x-init" {
+				g.linef("c.WriteHydrateProps(%q, %s)", key, val)
+				continue
+			}
 			g.linef(`c.WriteString(" %s=\"")`, key)
 			g.linef("c.WriteString(html.EscapeString(fmt.Sprint(%s)))", val)
 			g.linef(`c.WriteString("\"")`)
