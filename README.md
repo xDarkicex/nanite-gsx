@@ -149,6 +149,7 @@ nanite ─── nanite-render ─── nanite-gsx
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
+| `React.memo` | `@memo(func(rc, props) string { ... })` — cached HTML, render walk bypassed on repeated keys |
 | OOB portal (`createPortal`) | `@oob "slot-id"` — generated `WithOOB()` |
 | `import { X } from "..."` | `@import { X } from "..."` — symbol table resolves tags to `pkg.RenderX` |
 | Component libraries (`@/components/ui`) | `@import { Button } from "myapp/components/ui"` — cross-package composition via zero-byte marker types |
@@ -532,6 +533,34 @@ func UserCard(user models.User) { ... }
 ```
 
 The compiler emits `c.RequiresCSS("/static/css/user-card.css")` as the first line of the render function. When the component renders, the asset joins nanite-render's deduplicating graph and `<NANO_ASSETS/>` emits it once into `<head>`. A card rendered 50 times in a loop produces one `<link>` tag.
+
+### Component memoization (`@memo`)
+
+Cache expensive components at the source level — `React.memo` for Go. The directive takes a typed key generator; components whose key repeats skip the render walk and serve cached HTML:
+
+```gsx
+@memo(func(rc *render.RenderContext, props UserCardProps) string {
+    return props.ID
+})
+
+func UserCard(props UserCardProps) {
+    // ... expensive HTML generation ...
+}
+```
+
+The generated registration wraps the component with nanite-render's `Memoize`:
+
+```go
+cr.Define("UserCard").
+    Render(func(c *render.ComponentContext) error { ... }).
+    Register(cr)
+cr.Memoize("UserCard", func(rc *render.RenderContext, data any) string {
+    props := data.(UserCardProps)   // typed adapter generated automatically
+    return props.ID
+})
+```
+
+Perfect for data-independent components (navbars, static panels) and keyable-by-id components (user cards, product tiles). The keyer returns `""` to skip caching for a particular render.
 
 ### Cross-package composition (TSX-style)
 
