@@ -440,6 +440,8 @@ func UserCard(user User, showEmail bool) {
 }
 ```
 
+**Case-insensitive lookup:** Component names are normalized — `e.Register("UserCard", fn)` registers under the lowercase key. Templates can write `<UserCard/>` (gsx convention, PascalCase) or `<USERCARD/>` (plain HTML convention, UPPERCASE) — both resolve to the same function. The source of truth is the PascalCase name in the `.gsx` file.
+
 **Three lexer triggers:**
 
 | Trigger | Mode | What happens |

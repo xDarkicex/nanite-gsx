@@ -1,6 +1,10 @@
 package gsx
 
-import "github.com/xDarkicex/nanite-render"
+import (
+	"strings"
+
+	"github.com/xDarkicex/nanite-render"
+)
 
 // Engine implements render.Engine — the adapter that plugs
 // AOT-compiled .gsx views into nanite-render's universal
@@ -36,8 +40,12 @@ func New() *Engine {
 
 // Register adds an AOT-compiled view function under name.
 // Called from the generated RegisterX(e *Engine) functions.
+// Name is stored lowercased so lookups are case-insensitive —
+// a .gsx component registered as "UserCard" is reachable as
+// "UserCard" (gsx convention), "USERCARD" (plain HTML
+// convention), or any case variant.
 func (e *Engine) Register(name string, fn func(c *render.ComponentContext, data any) error) {
-	e.views[name] = fn
+	e.views[strings.ToLower(name)] = fn
 }
 
 // Name implements render.Engine.
@@ -47,7 +55,7 @@ func (e *Engine) Name() string { return "gsx" }
 // the view is already compiled. Returns a Program with the view
 // function stored in EngineData.
 func (e *Engine) Compile(_ []byte, name string) (*render.Program, error) {
-	fn, ok := e.views[name]
+	fn, ok := e.views[strings.ToLower(name)]
 	if !ok {
 		return nil, render.ErrTemplateNotFound
 	}

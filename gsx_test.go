@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/xDarkicex/nanite-gsx"
+	"github.com/xDarkicex/nanite-render"
 	"github.com/xDarkicex/nanite-gsx/internal/codegen"
 	"github.com/xDarkicex/nanite-gsx/internal/parser"
 )
@@ -60,6 +62,27 @@ func UserCard(name string, role string) {
 	}
 
 	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestEngine_CaseInsensitiveLookup verifies gsx.Engine resolves
+// views case-insensitively — "UserCard" and "USERCARD" both work.
+func TestEngine_CaseInsensitiveLookup(t *testing.T) {
+	e := gsx.New()
+	e.Register("UserCard", func(c *render.ComponentContext, data any) error {
+		_, err := c.WriteString("rendered")
+		return err
+	})
+
+	for _, name := range []string{"UserCard", "USERCARD", "usercard", "UsErCaRd"} {
+		p, err := e.Compile(nil, name)
+		if err != nil {
+			t.Errorf("Compile(%q): %v", name, err)
+			continue
+		}
+		if p == nil || p.EngineData == nil {
+			t.Errorf("Compile(%q): nil program or EngineData", name)
+		}
+	}
 }
 
 // TestE2E_ComponentCall verifies component call codegen.

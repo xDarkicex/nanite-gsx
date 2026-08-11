@@ -55,14 +55,9 @@ func (g *generator) emitHeader() {
 			g.linef(`_ %q`, imp.Path)
 		}
 	}
-	if p.PropsType != "" {
-		// Props type is defined in the same package.
-	}
-	if p.HasComponents {
-		g.line("")
-		g.line(`"github.com/xDarkicex/nanite-gsx"`)
-		g.line(`"github.com/xDarkicex/nanite-render"`)
-	}
+	g.line("")
+	g.line(`"github.com/xDarkicex/nanite-gsx"`)
+	g.line(`"github.com/xDarkicex/nanite-render"`)
 	g.line(")")
 	g.line("")
 
