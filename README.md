@@ -145,13 +145,34 @@ nanite ─── nanite-render ─── nanite-gsx
 | `"use server"` mutations | `@action` — colocated mutations, hoisted to `.Action()` |
 | CSS/JS imports | `@css` / `@js` — compiled to `c.RequiresCSS`/`c.RequiresJS`, deduped into `<NANO_ASSETS/>` |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
-| Client islands (Alpine.js) | `@hydrate("x-data", state)` — escaped JSON attribute bridge |
+| Client islands (Alpine.js) | Native — `@click` passes through, `x-data={go}` auto-hydrates to JSON, `x-cloak` auto-injected |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
 | OOB portal (`createPortal`) | `@oob "slot-id"` — generated `WithOOB()` |
 | `import { X } from "..."` | `@import { X } from "..."` — symbol table resolves tags to `pkg.RenderX` |
 | Component libraries (`@/components/ui`) | `@import { Button } from "myapp/components/ui"` — cross-package composition via zero-byte marker types |
+| Dev server hot-reload | `GSX_DEV_MODE=1 gsx watch` — browser auto-refreshes on save (nanite router + SSE Hub) |
+
+### React in Go — the full picture
+
+Everything React does on the client, `.gsx` does on the server — compiled to direct Go calls:
+
+| Layer | React | nanite-gsx |
+|---|---|---|
+| Components | JSX + props | `.gsx` + typed params (`go build` catches mismatches) |
+| Composition | children, fragments, spread, libraries | `@children`, `<></>`, `{...attrs}`, `@import { X }` |
+| State | `useState`, Context | `c.UseState`, `c.ProvideContext`/`c.UseContext` |
+| Data fetching | Server Components, `use` | `@action` colocated mutations + HTMX |
+| Async UI | `<Suspense>` + fallback | `@async` + `@fallback(X)` — streams via HTMX OOB |
+| Errors | Error Boundaries | `.ErrorBoundary(fn)` |
+| Routing | App Router file conventions | nanite router + `nano.RenderPage` (explicit, no magic) |
+| Client UI | React DOM | Alpine.js — `@click` native, `x-data` auto-hydrated |
+| Head | `generateMetadata` | `@css`/`@js` + `<NanoHead/>`/`<NanoAssets/>` |
+| Dev | HMR | `gsx watch` browser live-reload |
+| Rendering | Virtual DOM diffing | Direct `c.WriteString` calls — `0 B/op` |
+
+React's virtual DOM exists to make client-side updates cheap. There is no client-side DOM to update — the server emits the final HTML, HTMX swaps it, Alpine adds ephemeral interactivity. The React mental model survives; the React runtime doesn't.
 
 ---
 
@@ -609,19 +630,44 @@ for __k, __v := range attrs {
 
 Great for HTMX attributes, data-* payloads, and styling maps.
 
-### Client-side interactivity (`@hydrate`)
+### Native Alpine.js (the golden duo)
 
-Pass server state to Alpine.js / vanilla JS securely and without allocations:
+HTMX handles network state; Alpine handles ephemeral UI. Both are first-class in `.gsx` — no build step, no JS framework:
 
 ```gsx
-func Dropdown(state map[string]any) {
-    <div class="dropdown" @hydrate("x-data", state)>
-        ...
+func Dropdown(isOpen bool, items []string) {
+    <div x-data={map[string]any{"open": isOpen, "list": items}}>
+        <button @click="open = !open">Toggle</button>
+
+        <ul x-show="open" x-cloak>
+            <template x-for="item in list">
+                <li x-text="item"></li>
+            </template>
+        </ul>
     </div>
 }
 ```
 
-Compiles to `c.WriteHydrateProps("x-data", state)` — the JSON-serialized, HTML-escaped attribute bridge. State goes from Go struct to Alpine's `x-data` in one directive.
+**What the compiler does:**
+
+| Alpine syntax | Compiler behavior |
+|---|---|
+| `@click`, `@keydown`, `@mouseenter` | Pass through untouched — Alpine event directives are never parsed as gsx macros |
+| `x-data={goExpr}` / `x-init={goExpr}` | Auto-converts to `c.WriteHydrateProps("x-data", goExpr)` — JSON-serialized, HTML-escaped, valid Alpine state |
+| Any `x-` or `@` attribute present | Auto-injects `<style>[x-cloak]{display:none!important}</style>` — no flicker, no manual CSS |
+| `hx-post={c.ActionURL("save")}` + `hx-vals="js:{...}"` | HTMX server action triggered from Alpine state — the bridge composes natively |
+
+The generated code:
+
+```go
+c.WriteString(`<style>[x-cloak]{display:none!important}</style>`)
+c.WriteString(`<button`)
+c.WriteString(` @click="open = !open"`)          // Alpine event, raw
+c.WriteHydrateProps("x-data", map[string]any{"open": isOpen, "list": items})  // JSON bridge
+c.WriteString(`>`)
+```
+
+Go struct → Alpine state in one attribute. No `@hydrate` wrapper needed for the common case — the compiler recognizes `x-data` and does the right thing automatically. (`@hydrate("attr", state)` remains for non-Alpine attributes.)
 
 ### Flash form errors (`@error`)
 
@@ -872,6 +918,7 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] Fragments (`<>...</>` — zero-byte boundaries)
 - [x] Spread attributes (`{...attrs}` — runtime escaped `key="value"` loop)
 - [x] `@hydrate` (server state → client, Alpine.js bridge)
+- [x] Native Alpine.js (`@click` passthrough, `x-data={go}` auto-hydration, `x-cloak` injection)
 - [x] `@error` (flash form error macro)
 - [x] `gsx compile` CLI
 - [x] `gsx watch` with browser live-reload (nanite router + nanite/sse Hub)
