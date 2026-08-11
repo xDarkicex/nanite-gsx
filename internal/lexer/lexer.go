@@ -40,6 +40,7 @@ const (
 	KindAtChildren // @children
 	KindAtYield  // @yield
 	KindAtError  // @error("field")
+	KindAtMemo   // @memo(func(rc, props) string { ... })
 
 	// Decorators (before func declarations).
 	KindAtOOB     // @oob "slot-id"
@@ -368,6 +369,8 @@ func (s *Scanner) scanAtDirective() Token {
 		return Token{Kind: KindAtYield, Start: start, End: s.pos}
 	case "error":
 		return Token{Kind: KindAtError, Start: start, End: s.pos}
+	case "memo":
+		return Token{Kind: KindAtMemo, Start: start, End: s.pos}
 	case "oob":
 		return Token{Kind: KindAtOOB, Start: start, End: s.pos}
 	case "async":

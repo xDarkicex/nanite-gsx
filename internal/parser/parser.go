@@ -37,6 +37,9 @@ type ParsedFile struct {
 	CSSAssets  []string // @css "/path"
 	JSAssets   []string // @js "/path"
 
+	// @memo — component memoization keyer.
+	Memo MemoKeyer
+
 	HasComponents bool // true if body contains <CapitalComponent/>
 	Body          ir.NodeStream
 }
@@ -73,6 +76,7 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 	var pending Decorators
 	var pendingCSS, pendingJS []string
 	var pendingActions []Action
+	var pendingMemo MemoKeyer
 
 	for {
 		tok := p.scanner.Scan()
@@ -108,12 +112,19 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 				return nil, err
 			}
 			pendingActions = append(pendingActions, act)
+		case lexer.KindAtMemo:
+			memo, err := p.parseMemo()
+			if err != nil {
+				return nil, err
+			}
+			pendingMemo = memo
 		case lexer.KindFunc:
 			f := &ParsedFile{
 				Imports:   imports,
 				CSSAssets: pendingCSS,
 				JSAssets:  pendingJS,
 				Actions:   pendingActions,
+				Memo:      pendingMemo,
 			}
 			for _, d := range pending {
 				d.apply(f)
@@ -121,6 +132,7 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 			pending = nil
 			pendingCSS, pendingJS = nil, nil
 			pendingActions = nil
+			pendingMemo = MemoKeyer{}
 			if err := p.parseSignature(f); err != nil {
 				return nil, err
 			}
@@ -156,6 +168,14 @@ func resolveFallbacks(files []*ParsedFile) {
 			}
 		}
 	}
+}
+
+// MemoKeyer is the @memo cache-key generator: a typed function
+// that derives the cache key from props.
+type MemoKeyer struct {
+	Param string // e.g. "props"
+	Type  string // e.g. "UserCardProps"
+	Body  string // the raw Go body
 }
 
 // Action is a colocated server action: Go mutation logic that
@@ -284,6 +304,112 @@ sigDone:
 bodyDone:
 	act.Body = body.String()
 	return act, nil
+}
+
+// parseMemo reads @memo(func(rc, props Type) string { body }).
+// Captures the param name, type, and raw body.
+func (p *parser) parseMemo() (MemoKeyer, error) {
+	var m MemoKeyer
+
+	// Skip ( and func.
+	p.scanner.Scan() // (
+	if t := p.scanner.Scan(); t.Kind != lexer.KindFunc {
+		return m, fmt.Errorf("expected func after @memo(")
+	}
+
+	// Signature: read raw bytes from ( to the matching )
+	depth := 0
+	var sig strings.Builder
+	for {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return m, fmt.Errorf("unexpected EOF in @memo signature")
+		}
+		switch b {
+		case '(':
+			depth++
+			if depth > 1 {
+				sig.WriteByte(b)
+			}
+		case ')':
+			depth--
+			if depth == 0 {
+				goto sigDone
+			}
+			sig.WriteByte(b)
+		default:
+			sig.WriteByte(b)
+		}
+	}
+sigDone:
+	// First param: "rc *render.RenderContext, props UserCardProps".
+	parts := strings.SplitN(strings.TrimSpace(sig.String()), ",", 2)
+	if len(parts) == 2 {
+		fields := strings.Fields(parts[1])
+		if len(fields) >= 2 {
+			m.Param = fields[0]
+			m.Type = fields[len(fields)-1]
+		}
+	}
+
+	// Skip return type to the {.
+	for {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return m, fmt.Errorf("unexpected EOF before @memo body")
+		}
+		if b == '{' {
+			break
+		}
+	}
+
+	// Body: brace-counted raw Go.
+	depth = 1
+	var body strings.Builder
+	for depth > 0 {
+		b := p.scanner.NextByte()
+		if b == 0 {
+			return m, fmt.Errorf("unexpected EOF in @memo body")
+		}
+		switch b {
+		case '{':
+			depth++
+			body.WriteByte(b)
+		case '}':
+			depth--
+			if depth == 0 {
+				goto bodyDone
+			}
+			body.WriteByte(b)
+		case '"', '\'', '`':
+			body.WriteByte(b)
+			for {
+				c := p.scanner.NextByte()
+				if c == 0 {
+					return m, fmt.Errorf("unexpected EOF in @memo string")
+				}
+				body.WriteByte(c)
+				if c == '\\' {
+					e := p.scanner.NextByte()
+					if e == 0 {
+						return m, fmt.Errorf("unexpected EOF in @memo escape")
+					}
+					body.WriteByte(e)
+					continue
+				}
+				if c == b {
+					break
+				}
+			}
+		default:
+			body.WriteByte(b)
+		}
+	}
+bodyDone:
+	// Skip the closing ) of @memo(...).
+	p.scanner.Scan()
+	m.Body = body.String()
+	return m, nil
 }
 
 func (p *parser) parseDecorator(tok lexer.Token) (Decorator, error) {

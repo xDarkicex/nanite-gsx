@@ -504,6 +504,45 @@ func TestE2E_Alpine(t *testing.T) {
 	}
 }
 
+// TestE2E_Memo verifies @memo generates the Memoize wrapper.
+func TestE2E_Memo(t *testing.T) {
+	src := `@memo(func(rc *render.RenderContext, props UserCardProps) string {
+    return props.ID
+})
+
+func UserCard(props UserCardProps) {
+    <div>{props.Name}</div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	if parsed.Memo.Param != "props" || parsed.Memo.Type != "UserCardProps" {
+		t.Errorf("memo parsed wrong: %+v", parsed.Memo)
+	}
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		`cr.Memoize("UserCard", func(rc *render.RenderContext, data any) string {`,
+		`props := data.(UserCardProps)`,
+		`return props.ID`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

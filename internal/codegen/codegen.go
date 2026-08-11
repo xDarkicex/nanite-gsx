@@ -324,7 +324,7 @@ func (g *generator) emitFooter() {
 	// wires Suspense, OOB swaps, fallbacks, and server actions
 	// into the ComponentRegistry so templates can dispatch
 	// <UserProfile/> and inherit the lifecycles.
-	if p.OOBID != "" || p.Async || len(p.Actions) > 0 {
+	if p.OOBID != "" || p.Async || len(p.Actions) > 0 || p.Memo.Param != "" {
 		g.emitDecoratedRegistration()
 	}
 }
@@ -370,6 +370,17 @@ func (g *generator) emitDecoratedRegistration() {
 	g.linef("return Render%s(c, %s)", p.FuncName, strings.Join(args, ", "))
 	g.indent--
 	g.line("}).Register(cr)")
+
+	// @memo — wrap the registered component with a memoization
+	// cache. Memoize looks up the existing component and wraps it.
+	if p.Memo.Param != "" {
+		g.linef("cr.Memoize(%q, func(rc *render.RenderContext, data any) string {", p.FuncName)
+		g.indent++
+		g.linef("%s := data.(%s)", p.Memo.Param, p.Memo.Type)
+		g.line(p.Memo.Body)
+		g.indent--
+		g.line("})")
+	}
 	g.indent = 0
 	g.line("}")
 }
