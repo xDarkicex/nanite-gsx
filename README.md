@@ -154,6 +154,7 @@ nanite ─── nanite-render ─── nanite-gsx
 | `import { X } from "..."` | `@import { X } from "..."` — symbol table resolves tags to `pkg.RenderX` |
 | Component libraries (`@/components/ui`) | `@import { Button } from "myapp/components/ui"` — cross-package composition via zero-byte marker types |
 | Dev server hot-reload | `GSX_DEV_MODE=1 gsx watch` — browser auto-refreshes on save (nanite router + SSE Hub) |
+| VS Code language support | [nanite-gsx-vscode](https://github.com/xDarkicex/nanite-gsx-vscode) — TextMate grammar with embedded Go + HTML |
 
 ### React in Go — the full picture
 
@@ -172,6 +173,7 @@ Everything React does on the client, `.gsx` does on the server — compiled to d
 | Head | `generateMetadata` | `@css`/`@js` + `<NanoHead/>`/`<NanoAssets/>` |
 | Dev | HMR | `gsx watch` browser live-reload |
 | Rendering | Virtual DOM diffing | Direct `c.WriteString` calls — `0 B/op` |
+| Editor | JSX/TSX + LSP | [nanite-gsx-vscode](https://github.com/xDarkicex/nanite-gsx-vscode) — `.gsx` TextMate grammar |
 
 React's virtual DOM exists to make client-side updates cheap. There is no client-side DOM to update — the server emits the final HTML, HTMX swaps it, Alpine adds ephemeral interactivity. The React mental model survives; the React runtime doesn't.
 
@@ -184,6 +186,16 @@ React's virtual DOM exists to make client-side updates cheap. There is no client
 ```bash
 go get github.com/xDarkicex/nanite-gsx
 ```
+
+### VS Code extension
+
+```bash
+# Clone into your VS Code extensions directory
+git clone https://github.com/xDarkicex/nanite-gsx-vscode \
+  ~/.vscode/extensions/nanite.nanite-gsx-1.0.0
+```
+
+Reload VS Code (`Cmd+Shift+P` → "Developer: Reload Window") for `.gsx` syntax highlighting — `@directives`, HTML tags, `{Go expressions}`, Alpine.js, and HTMX attributes.
 
 ### Write a component
 
@@ -958,7 +970,7 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] `@error` (flash form error macro)
 - [x] `gsx compile` CLI
 - [x] `gsx watch` with browser live-reload (nanite router + nanite/sse Hub)
-- [ ] VS Code extension
+- [x] [VS Code extension](https://github.com/xDarkicex/nanite-gsx-vscode) (TextMate grammar, Go + HTML embedding)
 
 ---
 
