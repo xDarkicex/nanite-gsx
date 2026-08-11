@@ -735,3 +735,28 @@ func TestE2E_NestedIfElse(t *testing.T) {
 	}
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_QuotedAttrValue verifies static attribute values
+// containing double quotes (e.g. placeholder='["ops"]') escape
+// correctly in the generated Go — the raw value previously broke
+// the emitted string literal.
+func TestE2E_QuotedAttrValue(t *testing.T) {
+	src := `func Form() {
+    <input type="text" placeholder='["ops"]' />
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := codegen.Generate(files[0])
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	want := `placeholder=\"[\"ops\"]\"`
+	if !strings.Contains(got, want) {
+		t.Errorf("missing escaped attr:\n%s", got)
+	}
+	t.Logf("\nGenerated output:\n%s", got)
+}

@@ -110,6 +110,15 @@ func importsPath(p *parser.ParsedFile, path string) bool {
 	return false
 }
 
+// goStr escapes s for embedding in a double-quoted Go string
+// literal. Static attribute values may contain quotes, which would
+// otherwise break the generated code.
+func goStr(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
 // bodyHasExprs reports whether the body contains Go expressions
 // ({expr}, dynamic attributes) that need the fmt/html imports.
 func bodyHasExprs(p *parser.ParsedFile) bool {
@@ -663,7 +672,10 @@ func (g *generator) emitOpenTag(i int) {
 			g.linef("c.WriteString(html.EscapeString(fmt.Sprint(%s)))", val)
 			g.linef(`c.WriteString("\"")`)
 		default:
-			g.linef(`c.WriteString(" %s=\"%s\"")`, key, val)
+			// Static attribute values may contain double quotes
+			// (e.g. placeholder='["ops"]') — escape them for the
+			// emitted Go string literal.
+			g.linef(`c.WriteString(" %s=\"%s\"")`, key, goStr(val))
 		}
 	}
 	g.line(`c.WriteString(">")`)
