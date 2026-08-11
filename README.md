@@ -139,6 +139,9 @@ nanite ─── nanite-render ─── nanite-gsx
 | dynamic `className={...}` | `class={"btn " + type}` — split into escaped runtime writes |
 | `<CapitalComponent prop={v}/>` | `<UserCard user={u}/>` → `RenderUserCard(c, u)` — direct Go call |
 | `<Layout><Card/></Layout>` | Non-self-closing components → children closure |
+| `<>...</>` fragments | `<>...</>` — zero-byte structural boundaries |
+| `{...props}` spread | `{...attrs}` — runtime loop emitting escaped `key="value"` pairs |
+| Layouts (`layout.tsx`) | `@yield` — pure gsx layouts, no Jade |
 | `"use server"` mutations | `@action` — colocated mutations, hoisted to `.Action()` |
 | CSS/JS imports | `@css` / `@js` — compiled to `c.RequiresCSS`/`c.RequiresJS`, deduped into `<NANO_ASSETS/>` |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
@@ -261,9 +264,27 @@ Every `.gsx` component has two dispatch paths:
 
 Calls between `.gsx` components use the fast path. Cross-engine calls (jade layout → gsx view, handler → gsx component) use the dynamic path. Both are generated from the same source file.
 
-### Full-stack page
+### Full-stack page — gsx layouts, zero Jade
 
-Jade layout + gsx view + gsx components — three engines, one page:
+The entire application — layout and views — is `.gsx`. No Jade needed:
+
+```gsx
+// views/app_layout.gsx
+func AppLayout() {
+    <html>
+        <head>
+            <NanoHead />
+            <NanoAssets />
+        </head>
+        <body>
+            <Navbar />
+            <main>
+                @yield
+            </main>
+        </body>
+    </html>
+}
+```
 
 ```gsx
 // views/dashboard.gsx
@@ -278,41 +299,27 @@ func Dashboard(user models.User) {
 }
 ```
 
-```jade
-// layouts/app.jade
-html
-  head
-    NANO_HEAD
-    NANO_ASSETS
-  body
-    {{ yield }}
-```
-
 ```go
 // main.go
 gsxEngine := gsx.New()
-views.RegisterDashboard(gsxEngine)   // engine path (RenderNamed)
+views.RegisterAppLayout(gsxEngine)   // layout key: "AppLayout"
+views.RegisterDashboard(gsxEngine)
 views.RegisterHeader(gsxEngine)
 views.RegisterStatsGrid(gsxEngine)
 
-// Decorated components also register into the ComponentRegistry
-// so templates can dispatch <UserProfile/> with lifecycles.
-views.RegisterUserProfileComponent(cr)
-
-reg := render.New(
-    render.WithEngines(gsxEngine, engine.NewJade()),
-    render.WithDefaultLoader(render.NewFileLoader("./layouts", ".jade")),
-)
-reg.AttachComponents(cr)
+reg := render.New(render.WithEngines(gsxEngine))
 
 r := nanite.New()
 r.Get("/dashboard", func(c *nanite.Context) {
     user := loadCurrentUser(c)
-    nano.RenderPage(c, reg, "layouts/app", "Dashboard", user)
+    nano.RenderPage(c, reg, "AppLayout", "Dashboard", user)
 })
+r.Start(":3000")
 ```
 
-The flow: Jade renders the layout → `{{ yield }}` triggers → `gsx.Engine.Execute` calls `RenderDashboard(c, data)` → `<Header user={user}/>` calls `RenderHeader(c, user)` directly → `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly. Decorated components reachable by name from jade/plain-HTML templates with their full lifecycle chain (Suspense, OOB, fallbacks) intact.
+**The flow:** `nano.RenderPage` renders the view first (`RenderDashboard(c, user)`), stashes the bytes on the RenderContext, then renders the layout. `@yield` compiles to `c.Yield()` — nanite-render's composition hook — which writes the view body where the layout says. `<Header user={user}/>` calls `RenderHeader(c, user)` directly; `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly. `<NanoHead/>` and `<NanoAssets/>` emit head metadata and deduplicated assets. One engine, one language, the whole page.
+
+**Key resolution:** the layout/view names passed to `nano.RenderPage` are the **registered keys** in the gsx.Engine — by default the func names (`"AppLayout"`, `"Dashboard"`). There's no file loader at runtime; the views are compiled into the binary. Path-style keys are planned (the compiler can derive `"views/app_layout"` from the file path during the directory walk).
 
 ### React-style children composition
 
@@ -538,6 +545,68 @@ This makes destructured imports work for **both** components and Go types. `@imp
 
 Same-package composition needs no import — `<UserCard/>` in `dashboard.gsx` resolves to the local `RenderUserCard` automatically.
 
+### Pure gsx layouts (`@yield`)
+
+Layouts are gsx too. `@yield` is where the view body lands:
+
+```gsx
+// views/app_layout.gsx
+func AppLayout() {
+    <html>
+        <head><NanoHead/><NanoAssets/></head>
+        <body>
+            <Navbar/>
+            <main>
+                @yield
+            </main>
+        </body>
+    </html>
+}
+```
+
+Compiles to `if err := c.Yield(); err != nil { return err }` — nanite-render's composition hook that writes the pre-rendered view bytes. The two-pass pipeline renders the view first, stashes it on the RenderContext, then the layout's `@yield` writes it in place. No Jade, no `{{ yield }}`, no cross-engine layout composition — one language for the whole page.
+
+### Fragments (`<>...</>`)
+
+Return multiple siblings without a wrapper:
+
+```gsx
+func TableColumns(user User) {
+    <>
+        <td>{user.Name}</td>
+        <td>{user.Role}</td>
+    </>
+}
+```
+
+The fragment emits zero bytes — its children compile to sequential `c.WriteString` calls. Same React semantics, same absence of wrapper divs.
+
+### Spread attributes (`{...attrs}`)
+
+Pass a map of attributes to an element dynamically:
+
+```gsx
+func Button(label string, attrs map[string]string) {
+    <button class="btn" {...attrs}>
+        {label}
+    </button>
+}
+```
+
+Compiles to a runtime loop that HTML-escapes each key/value pair and writes `key="value"` into the tag:
+
+```go
+for __k, __v := range attrs {
+    c.WriteString(" ")
+    c.WriteString(html.EscapeString(fmt.Sprint(__k)))
+    c.WriteString("=\"")
+    c.WriteString(html.EscapeString(fmt.Sprint(__v)))
+    c.WriteString("\"")
+}
+```
+
+Great for HTMX attributes, data-* payloads, and styling maps.
+
 ### Composition from a handler
 
 ```go
@@ -680,6 +749,18 @@ func UserCard(user User, showEmail bool) {
 
     // Dynamic attributes — expressions in attribute values
     <button class={"btn " + btnType} hx-get={"/users/" + user.ID}>
+
+    // Spread attributes — map/struct of key=value pairs
+    <button {...attrs}>
+
+    // Fragments — zero-byte structural boundaries
+    <>
+        <td>a</td>
+        <td>b</td>
+    </>
+
+    // @yield — write the view body (layouts)
+    <main>@yield</main>
 }
 ```
 
@@ -691,7 +772,7 @@ func UserCard(user User, showEmail bool) {
 |---|---|---|
 | `<` | Tag mode | Uppercase = component call, lowercase = HTML. Non-self-closing collects inner content as children. `{attr}` values become dynamic attributes. |
 | `{` | Expression mode | Balanced-brace Go expression, HTML-escaped. In attribute position (`class={expr}`), emitted as split escaped runtime output. |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@oob`, `@async`, `@fallback`, `@action`, `@css`, `@js` |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@yield`, `@oob`, `@async`, `@fallback`, `@action`, `@css`, `@js` |
 
 **Imports — compiled to standard Go:**
 
@@ -725,6 +806,9 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] Cross-package component resolution (`@import { X } from "..."` → `pkg.RenderX`)
 - [x] Zero-byte marker types (destructured imports for components AND types)
 - [x] Conditional imports (no unused fmt/html on static-only components)
+- [x] `@yield` layouts (pure gsx — `c.Yield()` composition hook)
+- [x] Fragments (`<>...</>` — zero-byte boundaries)
+- [x] Spread attributes (`{...attrs}` — runtime escaped `key="value"` loop)
 - [x] `gsx compile` CLI
 - [x] `gsx watch` (poll-based hot reload)
 - [ ] VS Code extension
