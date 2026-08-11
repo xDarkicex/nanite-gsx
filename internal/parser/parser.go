@@ -140,6 +140,7 @@ func (p *parser) parse() ([]*ParsedFile, error) {
 			if err != nil {
 				return nil, err
 			}
+			p.scanner.ExitTemplate() // next func's preamble scans idents
 			f.Body = body
 			out = append(out, f)
 		case lexer.KindEOF:
@@ -588,11 +589,30 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 		case lexer.KindText, lexer.KindIdent:
 			// In template mode, bare identifiers (not inside {})
 			// are just text content — like "ADMIN" between tags.
-			b.AddText(tok.String(p.src))
+			s := tok.String(p.src)
+			if strings.TrimSpace(s) == "" {
+				// Whitespace between tokens is structural. Dropping
+				// it keeps @else/@case adjacent to their @if/
+				// @switch on the sibling chain.
+				continue
+			}
+			b.AddText(s)
 		case lexer.KindExpr:
 			s := tok.String(p.src)
 			expr := s[1 : len(s)-1]
 			b.AddExpr(expr)
+		case lexer.KindColon, lexer.KindSlash, lexer.KindComma,
+			lexer.KindEQ, lexer.KindLParen, lexer.KindRParen, lexer.KindGT:
+			// Boundary punctuation between text runs and
+			// expressions — ": ", "(x)", "a/b" in prose. The
+			// lexer emits these structurally; the body keeps
+			// them as text.
+			b.AddText(tok.String(p.src))
+		case lexer.KindString:
+			// Quoted prose — apostrophes and dialogue after an
+			// expression boundary. The token spans the quotes,
+			// so append verbatim.
+			b.AddText(tok.String(p.src))
 		case lexer.KindLT:
 			if err := p.parseTag(b, tok); err != nil {
 				return ir.NodeStream{}, err

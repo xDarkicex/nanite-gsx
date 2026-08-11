@@ -615,3 +615,77 @@ func UserList(users []models.User) {
 
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_ProseText verifies body text survives tokenization whole:
+// multi-word runs keep their spaces, punctuation (":", "/", "(", ")",
+// ",", "'") is not dropped, @ is literal, and "func" in prose is not
+// a keyword. The body scanner treats letter runs as text; boundary
+// punctuation is appended by the parser.
+func TestE2E_ProseText(t *testing.T) {
+	src := `func Profile(user models.User) {
+    <p>Contact: {user.Email} via https://demo.dev (see note)</p>
+    <p class="handle">@{user.ID} — don't miss it.</p>
+    <p>func is not a keyword here.</p>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	for _, want := range []string{
+		"Contact:",
+		"https://demo.dev (see note)",
+		"@",
+		"don",  // apostrophe split: `don` + `'t miss it.`
+		"'t miss it.",
+		"func is not a keyword here.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_LiteralAt verifies a bare @ in template text is literal —
+// emails and at-handles — not a lexer error.
+func TestE2E_LiteralAt(t *testing.T) {
+	src := `func Profile(user models.User) {
+    <p>alice@demo.dev is the demo account.</p>
+    <span class="handle">@{user.ID}</span>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	// The @ splits the text run, so the generated source has
+	// separate WriteString calls — check the pieces, not a
+	// contiguous string.
+	for _, want := range []string{
+		"alice",
+		"@",
+		"demo.dev is the demo account.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}

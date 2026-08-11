@@ -91,6 +91,11 @@ func NewScanner(src []byte) *Scanner {
 // body { is consumed.
 func (s *Scanner) EnterTemplate() { s.inTemplate = true }
 
+// ExitTemplate returns the scanner to preamble mode — the next
+// func's signature and decorators scan idents, not text. Call
+// when a func body closes.
+func (s *Scanner) ExitTemplate() { s.inTemplate = false }
+
 // NextByte reads the next raw byte and advances the position.
 // Returns 0 at EOF.
 func (s *Scanner) NextByte() byte {
@@ -152,11 +157,21 @@ func (s *Scanner) Scan() Token {
 		s.pos++
 		return Token{Kind: KindRParen, Start: s.pos - 1, End: s.pos}
 	case b == 'f':
+		if s.inTemplate {
+			// "func" in prose is text, not a keyword.
+			return s.scanText()
+		}
 		if s.matchKeyword("func") {
 			return s.scanFunc()
 		}
 		return s.scanIdent()
 	case isLetter(b):
+		if s.inTemplate {
+			// In the body, letter runs are prose — scanText
+			// keeps spaces and punctuation together so
+			// "Hello world, this is a test." survives whole.
+			return s.scanText()
+		}
 		return s.scanIdent()
 	case b == '\n', b == '\r':
 		return s.scanText()
@@ -170,7 +185,22 @@ func (s *Scanner) skipWS() {
 	for s.pos < s.end {
 		b := s.src[s.pos]
 		switch {
-		case b == ' ' || b == '\t' || b == '\r' || b == '\n':
+		case b == '\n' || b == '\r':
+			s.pos++
+			if s.inTemplate {
+				// Strip the line's indentation too. Mid-line
+				// spaces are text ("Hello {x} world"); line
+				// starts are layout.
+				for s.pos < s.end && (s.src[s.pos] == ' ' || s.src[s.pos] == '\t') {
+					s.pos++
+				}
+			}
+		case b == ' ' || b == '\t':
+			if s.inTemplate {
+				// Mid-line whitespace belongs to the text run —
+				// stop so scanText absorbs it.
+				return
+			}
 			s.pos++
 		case b == '/' && s.pos+1 < s.end && s.src[s.pos+1] == '/':
 			// Line comment — skip to newline.
@@ -194,10 +224,13 @@ func (s *Scanner) scanIdent() Token {
 
 func (s *Scanner) scanText() Token {
 	start := s.pos
-	// Consume until we hit a trigger character or WS-only line end.
+	// Consume until we hit a trigger character. Quotes are
+	// triggers too: directive values like @case "admin" must
+	// scan as KindString, and prose quotes round-trip as text
+	// via the parser's KindString append.
 	for s.pos < s.end {
 		b := s.src[s.pos]
-		if b == '<' || b == '{' || b == '@' {
+		if b == '<' || b == '{' || b == '@' || b == '"' || b == '\'' || b == '`' {
 			break
 		}
 		s.pos++
@@ -386,7 +419,12 @@ func (s *Scanner) scanAtDirective() Token {
 	case "import":
 		return Token{Kind: KindAtImport, Start: start, End: s.pos}
 	default:
-		return Token{Kind: KindError, Start: start, End: s.pos}
+		// Not a directive keyword — the @ is literal text:
+		// emails (alice@demo.dev), at-handles (@{user.ID}),
+		// @media in prose. Emit just the @ as text and let the
+		// next Scan consume what follows.
+		s.pos = kwStart
+		return Token{Kind: KindText, Start: start, End: kwStart}
 	}
 }
 
