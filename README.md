@@ -146,7 +146,8 @@ nanite ─── nanite-render ─── nanite-gsx
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
 | OOB portal (`createPortal`) | `@oob "slot-id"` — generated `WithOOB()` |
-| `import { X } from "..."` | `@import { X } from "..."` — ES6-style, compiled to Go aliases |
+| `import { X } from "..."` | `@import { X } from "..."` — symbol table resolves tags to `pkg.RenderX` |
+| Component libraries (`@/components/ui`) | `@import { Button } from "myapp/components/ui"` — cross-package composition via zero-byte marker types |
 
 ---
 
@@ -502,6 +503,41 @@ func UserCard(user models.User) { ... }
 
 The compiler emits `c.RequiresCSS("/static/css/user-card.css")` as the first line of the render function. When the component renders, the asset joins nanite-render's deduplicating graph and `<NANO_ASSETS/>` emits it once into `<head>`. A card rendered 50 times in a loop produces one `<link>` tag.
 
+### Cross-package composition (TSX-style)
+
+Build component libraries in isolated packages and import them — exactly like `import { Button } from "@/components/ui"` in TSX:
+
+```gsx
+// views/login.gsx
+@import { Button, Input } from "myapp/components/ui"
+
+func LoginForm() {
+    <form hx-post="/login">
+        <Input inputType="email" name="email" />
+        <Button label="Login" />
+    </form>
+}
+```
+
+The compiler resolves `<Button/>` through the **symbol table**: the destructured import maps `Button` → package alias `ui`, and the tag emits a qualified direct call:
+
+```go
+// Generated — no reflection, no registry lookup, 0 B/op
+if err := ui.RenderButton(c, "Login", nil); err != nil { return err }
+```
+
+**The zero-byte marker type.** Go aliases types, not functions — but `type Button = ui.Button` needs `ui.Button` to be a *type*. The compiler emits a marker type alongside every component's render function:
+
+```go
+// in the ui package
+type Button struct{}  // zero bytes at runtime — exists so the alias compiles
+func RenderButton(c *render.ComponentContext, label string, children func(...) error) error { ... }
+```
+
+This makes destructured imports work for **both** components and Go types. `@import { User } from "myapp/models"` gives you `User` as a real type for `{user.Name}` expressions; `@import { Button } from "myapp/components/ui"` gives you `<Button/>` resolving to `ui.RenderButton`. One syntax, both worlds.
+
+Same-package composition needs no import — `<UserCard/>` in `dashboard.gsx` resolves to the local `RenderUserCard` automatically.
+
 ### Composition from a handler
 
 ```go
@@ -661,9 +697,11 @@ func UserCard(user User, showEmail bool) {
 
 | .gsx syntax | Generated Go |
 |---|---|
-| `@import "time"` | `import _ "time"` |
+| `@import "time"` | `import "time"` |
 | `@import models "myapp/models"` | `import models "myapp/models"` |
-| `@import { User, Post } from "myapp/models"` | `import pkg "myapp/models"` + `type User = pkg.User` |
+| `@import { User, Post } from "myapp/models"` | `import models "myapp/models"` + `type User = models.User` — types usable in `{expr}`, component tags resolve to `models.RenderPost` |
+
+**Cross-package resolution:** every component also emits a zero-byte marker type (`type X struct{}`), so destructured symbols compile as Go type aliases for **both** types and components. `<Post/>` in the template resolves to `models.RenderPost(c, ...)` via the symbol table; `Post` as a type in expressions resolves to the alias. No reflection, no registry lookup — direct Go function calls across packages.
 
 ---
 
@@ -684,6 +722,9 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] Asset directives (`@css` / `@js` → `c.RequiresCSS`/`c.RequiresJS`)
 - [x] Multi-param registration (`BindProps` + generated props struct)
 - [x] `@switch` / `@case` / `@default`
+- [x] Cross-package component resolution (`@import { X } from "..."` → `pkg.RenderX`)
+- [x] Zero-byte marker types (destructured imports for components AND types)
+- [x] Conditional imports (no unused fmt/html on static-only components)
 - [x] `gsx compile` CLI
 - [x] `gsx watch` (poll-based hot reload)
 - [ ] VS Code extension
