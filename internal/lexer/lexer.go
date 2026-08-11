@@ -256,6 +256,14 @@ func (s *Scanner) scanString(quote byte) Token {
 			s.pos++
 			break
 		}
+		if s.inTemplate && (b == '\n' || b == '\r' || b == '<') {
+			// An apostrophe in prose is usually unterminated
+			// ("widget's ..." — no second quote on the line).
+			// Stop at the line end — and at < so closing tags
+			// stay parseable instead of being swallowed into
+			// the string (which unbalances the builder stack).
+			break
+		}
 		s.pos++
 	}
 	return Token{Kind: KindString, Start: start, End: s.pos}

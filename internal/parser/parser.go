@@ -623,8 +623,8 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 				return ir.NodeStream{}, err
 			}
 		case lexer.KindAtElse:
-			// Close the previous @if and open an @else block.
-			b.CloseControl()
+			// Pair with the @if block the preceding } closed —
+			// the builder tracks it (nested if/else included).
 			b.OpenElse()
 			blockDepth++
 			// Consume the block-opening { (no condition on else).

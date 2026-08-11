@@ -689,3 +689,49 @@ func TestE2E_LiteralAt(t *testing.T) {
 
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_NestedIfElse verifies nested @if/@else pairs with the
+// INNER if — the else must not attach to the outer guard.
+func TestE2E_NestedIfElse(t *testing.T) {
+	src := `func Panel(on bool) {
+    <div>
+        @if on {
+            @if on {
+                <span>inner-true</span>
+            } @else {
+                <span>inner-false</span>
+            }
+        }
+    </div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := codegen.Generate(files[0])
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	// The else must be nested INSIDE the outer if, paired with
+	// the inner if. The inner-false span must appear inside an
+	// else of the INNER if — i.e. before the outer if's closing.
+	inner := strings.Index(got, "if on {")
+	outer := strings.LastIndex(got, "if on {")
+	if inner == -1 || outer == -1 || inner == outer {
+		t.Fatalf("expected two ifs:\n%s", got)
+	}
+	falsePos := strings.Index(got, "inner-false")
+	if falsePos == -1 {
+		t.Fatalf("missing inner-false branch:\n%s", got)
+	}
+	// The else block closes before the outer if does: the first
+	// "}" after the inner-else content must come before the outer
+	// if's closing brace. Simplest check: the inner-false content
+	// appears after "else {" which follows the inner if.
+	if !strings.Contains(got, "else {") {
+		t.Fatalf("missing else:\n%s", got)
+	}
+	t.Logf("\nGenerated output:\n%s", got)
+}

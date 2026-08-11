@@ -6,6 +6,12 @@ package ir
 type Builder struct {
 	stream NodeStream
 	stack  []int // parent node indices during tree construction
+
+	// lastClosedIf tracks the most recently closed @if block so
+	// @else can pair with it as a sibling — including nested
+	// if/else, where the else must attach to the inner if, not
+	// the outer one. -1 when none.
+	lastClosedIf int
 }
 
 // NewBuilder returns a Builder with a synthetic document root
@@ -13,7 +19,7 @@ type Builder struct {
 // every top-level node gets proper parent/sibling links — the
 // codegen relies on sibling chains for @else, @case, etc.
 func NewBuilder() *Builder {
-	b := &Builder{}
+	b := &Builder{lastClosedIf: -1}
 	b.stream.Kind = append(b.stream.Kind, KindFragment)
 	b.ensureLen(1)
 	b.stack = append(b.stack, 0)
@@ -168,7 +174,17 @@ func (b *Builder) OpenIf(cond string) {
 func (b *Builder) OpenElse() {
 	idx := len(b.stream.Kind)
 	b.stream.Kind = append(b.stream.Kind, KindElse)
-	b.addCommonRaw(idx)
+	if b.lastClosedIf >= 0 {
+		// The else is the closed if's sibling: same parent,
+		// linked right after it. The if is the last node of
+		// its parent's chain when the else opens.
+		b.ensureLen(idx + 1)
+		parent := int(b.stream.Parent[b.lastClosedIf])
+		b.linkChild(parent, idx)
+		b.lastClosedIf = -1
+	} else {
+		b.addCommonRaw(idx)
+	}
 	b.stack = append(b.stack, idx)
 }
 
@@ -202,9 +218,11 @@ func (b *Builder) OpenDefault() {
 // @else / @for / @switch). Like CloseTag, the close is a no-op
 // node — it doesn't exist in the stream — so we just pop.
 func (b *Builder) CloseControl() {
-	if len(b.stack) > 0 {
-		if len(b.stack) > 1 {
-			b.stack = b.stack[:len(b.stack)-1]
+	if len(b.stack) > 1 {
+		popped := b.stack[len(b.stack)-1]
+		b.stack = b.stack[:len(b.stack)-1]
+		if b.stream.Kind[popped] == KindIf {
+			b.lastClosedIf = popped
 		}
 	}
 }
