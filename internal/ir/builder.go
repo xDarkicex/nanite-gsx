@@ -97,6 +97,14 @@ func (b *Builder) AddYield() {
 	b.addCommon()
 }
 
+// AddError appends an @error("field") node — the form error span
+// boilerplate.
+func (b *Builder) AddError(field string) {
+	b.stream.Kind = append(b.stream.Kind, KindError)
+	b.stream.Text = append(b.stream.Text, field)
+	b.addCommon()
+}
+
 // OpenFragment starts a <></> fragment — a no-op structural
 // boundary whose children emit consecutively.
 func (b *Builder) OpenFragment() {
@@ -246,6 +254,7 @@ func (b *Builder) setAttrs(attrs ...string) {
 		b.stream.AttrVals = append(b.stream.AttrVals, val)
 		b.stream.AttrDynamic = append(b.stream.AttrDynamic, dynamic)
 		b.stream.AttrSpread = append(b.stream.AttrSpread, key == "...")
+		b.stream.AttrHydrate = append(b.stream.AttrHydrate, key == "@hydrate")
 	}
 	b.stream.AttrStart = append(b.stream.AttrStart, start)
 	b.stream.AttrEnd = append(b.stream.AttrEnd, uint32(len(b.stream.AttrKeys)))
@@ -258,6 +267,8 @@ func (b *Builder) setDynamicAttr(key, expr string) {
 	b.stream.AttrKeys = append(b.stream.AttrKeys, key)
 	b.stream.AttrVals = append(b.stream.AttrVals, expr)
 	b.stream.AttrDynamic = append(b.stream.AttrDynamic, true)
+	b.stream.AttrSpread = append(b.stream.AttrSpread, false)
+	b.stream.AttrHydrate = append(b.stream.AttrHydrate, false)
 }
 
 func (b *Builder) addCommon() {

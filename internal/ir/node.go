@@ -25,6 +25,7 @@ const (
 	KindView                     // marker: start of a @view/component region
 	KindFragment                 // synthetic document root (index 0) or <></> fragment
 	KindYield                    // @yield — write the pre-rendered view body
+	KindError                    // @error("field") — form error span
 )
 
 // NodeStream is the flat, structure-of-arrays AST produced by
@@ -56,6 +57,7 @@ type NodeStream struct {
 	AttrVals    []string  // always strings in the IR; codegen decides escaping
 	AttrDynamic []bool    // true if AttrVals[i] is a Go expression {expr}
 	AttrSpread  []bool    // true if AttrKeys[i]=="..." — spread a map/struct of attrs
+	AttrHydrate []bool    // true if AttrKeys[i]=="@hydrate" — value is "attrName\x00expr"
 
 	// Control flow condition (KindIf, KindFor, KindSwitch).
 	Cond []string

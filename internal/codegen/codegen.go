@@ -5,6 +5,7 @@ package codegen
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/xDarkicex/nanite-gsx/internal/ir"
@@ -104,7 +105,7 @@ type generator struct {
 func bodyHasExprs(p *parser.ParsedFile) bool {
 	s := p.Body
 	for i := 0; i < s.Count; i++ {
-		if s.Kind[i] == ir.KindExpr || s.Kind[i] == ir.KindRawExpr {
+		if s.Kind[i] == ir.KindExpr || s.Kind[i] == ir.KindRawExpr || s.Kind[i] == ir.KindError {
 			return true
 		}
 		for k := int(s.AttrStart[i]); k < int(s.AttrEnd[i]); k++ {
@@ -231,6 +232,34 @@ func (g *generator) emitHeader() {
 	for _, src := range p.JSAssets {
 		g.linef("c.RequiresJS(%q)", src)
 	}
+
+	// GSX_DEV_MODE: inject the live-reload script into layouts
+	// (files with @yield) so the browser auto-refreshes on
+	// recompile. One connection, one reload directive.
+	if isDevMode() && bodyHasYield(p) {
+		g.line(`c.WriteString(` + "`" + devReloadScript + "`" + `)`)
+	}
+}
+
+// devReloadScript connects to the gsx watch SSE server and
+// reloads the page when a message arrives.
+const devReloadScript = `<script>new EventSource("http://localhost:3001/reload").onmessage=function(){location.reload()}</script>`
+
+// isDevMode reports whether GSX_DEV_MODE is set.
+func isDevMode() bool {
+	_, ok := os.LookupEnv("GSX_DEV_MODE")
+	return ok
+}
+
+// bodyHasYield reports whether the body contains a @yield node —
+// the marker for a layout.
+func bodyHasYield(p *parser.ParsedFile) bool {
+	for i := 0; i < p.Body.Count; i++ {
+		if p.Body.Kind[i] == ir.KindYield {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *generator) emitFooter() {
@@ -363,6 +392,17 @@ func (g *generator) emitNode(i int) (int, error) {
 
 	case ir.KindYield:
 		g.line("if err := c.Yield(); err != nil { return err }")
+
+	case ir.KindError:
+		// @error("field") — the form error span boilerplate.
+		field := s.Text[i]
+		g.linef("if __err := c.Context.GetFormError(%q); __err != \"\" {", field)
+		g.indent++
+		g.line(`c.WriteString("<span class=\"error\">")`)
+		g.line("c.WriteString(html.EscapeString(__err))")
+		g.line(`c.WriteString("</span>")`)
+		g.indent--
+		g.line("}")
 
 	case ir.KindFragment:
 		// Fragments (<>...</>) emit no bytes — just walk children.
@@ -535,6 +575,12 @@ func (g *generator) emitOpenTag(i int) {
 		key := s.AttrKeys[k]
 		val := s.AttrVals[k]
 		switch {
+		case k < len(s.AttrHydrate) && s.AttrHydrate[k]:
+			// @hydrate("x-data", state) → WriteHydrateProps.
+			parts := strings.SplitN(val, "\x00", 2)
+			if len(parts) == 2 {
+				g.linef("c.WriteHydrateProps(%q, %s)", parts[0], parts[1])
+			}
 		case k < len(s.AttrSpread) && s.AttrSpread[k]:
 			// {...attrs} — spread a map[string]string at runtime.
 			g.linef("for __k, __v := range %s {", val)

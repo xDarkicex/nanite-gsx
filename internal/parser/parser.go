@@ -489,6 +489,15 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 			b.AddChildren()
 		case lexer.KindAtYield:
 			b.AddYield()
+		case lexer.KindAtError:
+			// @error("field")
+			p.scanner.Scan() // skip (
+			s := p.scanner.Scan()
+			if s.Kind != lexer.KindString {
+				return ir.NodeStream{}, fmt.Errorf("expected string after @error(")
+			}
+			p.scanner.Scan() // skip )
+			b.AddError(unquote(s, p.src))
 
 		case lexer.KindAtFor:
 			blockDepth++
@@ -678,6 +687,25 @@ func parseAttrs(s string) []string {
 		s = strings.TrimLeft(s, " \t\n")
 		if len(s) == 0 {
 			break
+		}
+		// @hydrate("x-data", state) — server state passed to a
+		// client-side framework (Alpine.js x-data, vanilla JS).
+		if strings.HasPrefix(s, "@hydrate(") {
+			// Find the closing paren.
+			j := strings.IndexByte(s, ')')
+			if j < 0 {
+				break
+			}
+			args := s[len("@hydrate("):j]
+			parts := strings.SplitN(args, ",", 2)
+			attrName := strings.Trim(strings.TrimSpace(parts[0]), `"'`)
+			expr := ""
+			if len(parts) == 2 {
+				expr = strings.TrimSpace(parts[1])
+			}
+			attrs = append(attrs, "@hydrate", attrName+"\x00"+expr)
+			s = s[j+1:]
+			continue
 		}
 		// Bare spread at attribute position: {...attrs}
 		if s[0] == '{' {

@@ -438,6 +438,40 @@ func TestE2E_YieldFragmentSpread(t *testing.T) {
 	t.Logf("\nGenerated output:\n%s", got)
 }
 
+// TestE2E_HydrateAndError verifies @hydrate and @error codegen.
+func TestE2E_HydrateAndError(t *testing.T) {
+	src := `func Dropdown(state map[string]any) {
+    <div class="dropdown" @hydrate("x-data", state)>
+        <input type="email" name="email" />
+        @error("email")
+    </div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		`c.WriteHydrateProps("x-data", state)`,
+		`if __err := c.Context.GetFormError("email"); __err != "" {`,
+		`<span class=\"error\">`,
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xDarkicex/nanite"
+	"github.com/xDarkicex/nanite/sse"
 	"github.com/xDarkicex/nanite-gsx/internal/codegen"
 	"github.com/xDarkicex/nanite-gsx/internal/parser"
 )
@@ -52,15 +55,33 @@ func watch(dir, out string) error {
 		return err
 	}
 
+	// Start the live-reload SSE server on the stack's own router
+	// and SSE hub — the same components the app itself uses.
+	hub := sse.NewHub(context.Background(), time.Second)
+	r := nanite.New()
+	sse.Register(r, "/reload", func(conn *sse.Connection, c *nanite.Context) {
+		hub.Register(conn)
+		defer hub.Unregister(conn)
+		// Block until the client disconnects.
+		<-c.Request.Context().Done()
+	})
+	go func() {
+		log.Printf("gsx watch: live-reload on http://localhost:3001/reload")
+		if err := r.Start(":3001"); err != nil {
+			log.Printf("gsx watch: reload server: %v", err)
+		}
+	}()
+
 	log.Printf("gsx watch: watching %s (Ctrl-C to stop)", dir)
-	return watchLoop(dir, out)
+	return watchLoop(dir, out, hub)
 }
 
 // watchLoop polls dir every 100ms, recompiles any .gsx file
-// whose modification time changed since the last pass. Simple,
-// dependency-free, good enough for dev.
-func watchLoop(dir, out string) error {
+// whose modification time changed since the last pass, then
+// broadcasts a reload over the SSE hub so browsers refresh.
+func watchLoop(dir, out string, hub *sse.Hub) error {
 	lastMod := map[string]int64{}
+	changed := false
 	scan := func() {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -82,13 +103,19 @@ func watchLoop(dir, out string) error {
 			srcPath := filepath.Join(dir, e.Name())
 			if err := compileFile(srcPath, out); err != nil {
 				log.Printf("gsx: %v", err) // don't crash the watcher
+			} else {
+				changed = true
 			}
 		}
 	}
 	scan() // initial pass
 	for {
 		time.Sleep(100 * time.Millisecond)
+		changed = false
 		scan()
+		if changed {
+			hub.Broadcast([]byte("reload"))
+		}
 	}
 }
 
