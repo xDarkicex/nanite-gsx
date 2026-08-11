@@ -20,11 +20,13 @@ type Import struct {
 // ParsedFile is the output of the parser — a ready-to-generate
 // component definition.
 type ParsedFile struct {
-	Imports  []Import
-	FuncName string
-	Params   []string // e.g. ["props UserCardProps"]
-	Returns  []string // e.g. ["error"]
-	Body     ir.NodeStream
+	Imports       []Import
+	FuncName      string
+	Params        []string // e.g. ["user models.User"]
+	Returns       []string // e.g. ["error"]
+	PropsType     string   // e.g. "UserCardProps" if single struct param
+	HasComponents bool     // true if body contains <CapitalComponent/>
+	Body          ir.NodeStream
 }
 
 // Parse reads a .gsx source into a ParsedFile.
