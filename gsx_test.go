@@ -25,10 +25,11 @@ func UserCard(name string, role string) {
     </div>
 }`
 
-	parsed, err := parser.Parse([]byte(src))
+	files, err := parser.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed := files[0]
 
 	if len(parsed.Imports) != 1 || parsed.Imports[0].Path != "time" {
 		t.Errorf("imports = %+v", parsed.Imports)
@@ -100,10 +101,11 @@ func DashboardLayout(title string) {
     </div>
 }`
 
-	parsed, err := parser.Parse([]byte(src))
+	files, err := parser.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed := files[0]
 
 	got, err := codegen.Generate(parsed)
 	if err != nil {
@@ -127,10 +129,11 @@ func TestE2E_DynamicAttrs(t *testing.T) {
     <button class={"btn " + btnType}>Click</button>
 }`
 
-	parsed, err := parser.Parse([]byte(src))
+	files, err := parser.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed := files[0]
 
 	got, err := codegen.Generate(parsed)
 	if err != nil {
@@ -139,6 +142,95 @@ func TestE2E_DynamicAttrs(t *testing.T) {
 
 	if !strings.Contains(got, `html.EscapeString(fmt.Sprint("btn " + btnType))`) {
 		t.Errorf("missing escaped dynamic attr:\n%s", got)
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_Decorators verifies @oob/@async/@fallback generate the
+// fluent builder chain in RegisterXComponent.
+func TestE2E_Decorators(t *testing.T) {
+	src := `@oob "user-profile-slot"
+@async
+func UserProfile(user models.User) {
+    <div>{user.Name}</div>
+}
+
+@fallback(UserProfile)
+func UserProfileSkeleton() {
+    <div class="skeleton">Loading...</div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 funcs, got %d", len(files))
+	}
+
+	profile := files[0]
+	if !profile.Async || profile.OOBID != "user-profile-slot" {
+		t.Errorf("decorators not parsed: async=%v oob=%q", profile.Async, profile.OOBID)
+	}
+	if profile.Fallback != "UserProfileSkeleton" {
+		t.Errorf("fallback not resolved: %q", profile.Fallback)
+	}
+
+	got, err := codegen.Generate(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		"func RegisterUserProfileComponent",
+		`WithOOB("user-profile-slot")`,
+		"Async()",
+		"RenderUserProfileSkeleton(c, nil)",
+		".Register(cr)",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_Switch verifies @switch/@case/@default codegen.
+func TestE2E_Switch(t *testing.T) {
+	src := `func RoleView(role string) {
+    @switch role {
+        @case "admin":
+            <AdminPanel />
+        @default:
+            <StandardView />
+    }
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		"switch role {",
+		`case "admin":`,
+		"RenderAdminPanel(c, nil)",
+		"default:",
+		"RenderStandardView(c, nil)",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
 	}
 
 	t.Logf("\nGenerated output:\n%s", got)
@@ -156,10 +248,11 @@ func UserList(users []models.User) {
     </div>
 }`
 
-	parsed, err := parser.Parse([]byte(src))
+	files, err := parser.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
+	parsed := files[0]
 
 	got, err := codegen.Generate(parsed)
 	if err != nil {

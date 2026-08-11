@@ -20,20 +20,41 @@ type Import struct {
 // ParsedFile is the output of the parser — a ready-to-generate
 // component definition.
 type ParsedFile struct {
-	Imports       []Import
-	FuncName      string
-	Params        []string // e.g. ["user models.User"]
-	Returns       []string // e.g. ["error"]
-	PropsType     string   // e.g. "UserCardProps" if single struct param
-	HasComponents bool     // true if body contains <CapitalComponent/>
+	Imports   []Import
+	FuncName  string
+	Params    []string // e.g. ["user models.User"]
+	Returns   []string // e.g. ["error"]
+	PropsType string   // e.g. "UserCardProps" if single struct param
+
+	// Decorators (lifecycle bridge to nanite-render).
+	OOBID      string // @oob "slot-id" → WithOOB("slot-id")
+	Async      bool   // @async → Async()
+	FallbackOf string // @fallback(UserProfile) → this func is the fallback
+	Fallback   string // resolved: the FuncName of the fallback func
+
+	HasComponents bool // true if body contains <CapitalComponent/>
 	Body          ir.NodeStream
 }
 
-// Parse reads a .gsx source into a ParsedFile.
-func Parse(src []byte) (*ParsedFile, error) {
+// Parse reads a .gsx source into one or more ParsedFiles — one
+// per func declaration, with decorators attached.
+func Parse(src []byte) ([]*ParsedFile, error) {
 	s := lexer.NewScanner(src)
 	p := &parser{scanner: s, src: src}
 	return p.parse()
+}
+
+// ParseOne is a convenience for callers that expect a single
+// component per file. Returns the first ParsedFile.
+func ParseOne(src []byte) (*ParsedFile, error) {
+	files, err := Parse(src)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no component found")
+	}
+	return files[0], nil
 }
 
 type parser struct {
@@ -41,10 +62,11 @@ type parser struct {
 	src     []byte
 }
 
-func (p *parser) parse() (*ParsedFile, error) {
-	out := &ParsedFile{}
+func (p *parser) parse() ([]*ParsedFile, error) {
+	var out []*ParsedFile
+	var imports []Import
+	var pending Decorators
 
-	// Phase 1: preamble — @import directives + func signature.
 	for {
 		tok := p.scanner.Scan()
 		switch tok.Kind {
@@ -53,29 +75,105 @@ func (p *parser) parse() (*ParsedFile, error) {
 			if err != nil {
 				return nil, err
 			}
-			out.Imports = append(out.Imports, imp)
-		case lexer.KindFunc:
-			if err := p.parseSignature(out); err != nil {
+			imports = append(imports, imp)
+		case lexer.KindAtOOB, lexer.KindAtAsync, lexer.KindAtFallback:
+			dec, err := p.parseDecorator(tok)
+			if err != nil {
 				return nil, err
 			}
-			// After the func signature, the { opens the body.
-			// Fall through to body parsing.
-			goto body
+			pending = append(pending, dec)
+		case lexer.KindFunc:
+			f := &ParsedFile{Imports: imports}
+			for _, d := range pending {
+				d.apply(f)
+			}
+			pending = nil
+			if err := p.parseSignature(f); err != nil {
+				return nil, err
+			}
+			body, err := p.parseBody(f)
+			if err != nil {
+				return nil, err
+			}
+			f.Body = body
+			out = append(out, f)
 		case lexer.KindEOF:
-			return nil, fmt.Errorf("unexpected EOF before func signature")
+			if len(out) == 0 {
+				return nil, fmt.Errorf("unexpected EOF before func signature")
+			}
+			resolveFallbacks(out)
+			return out, nil
 		default:
-			// Skip whitespace/comments between directives.
+			// Skip whitespace/comments between declarations.
 		}
 	}
+}
 
-body:
-	// Phase 2: template body (HTML with triggers).
-	body, err := p.parseBody(out)
-	if err != nil {
-		return nil, err
+// resolveFallbacks links each func marked @fallback(X) to X's
+// Fallback field, so the codegen can emit the Fallback closure.
+func resolveFallbacks(files []*ParsedFile) {
+	byName := make(map[string]*ParsedFile, len(files))
+	for _, f := range files {
+		byName[f.FuncName] = f
 	}
-	out.Body = body
-	return out, nil
+	for _, f := range files {
+		if f.FallbackOf != "" {
+			if target, ok := byName[f.FallbackOf]; ok {
+				target.Fallback = f.FuncName
+			}
+		}
+	}
+}
+
+// Decorators are @-directives that precede a func declaration
+// and wire the component into nanite-render lifecycles.
+type Decorators []Decorator
+
+// Decorator is a single lifecycle directive.
+type Decorator struct {
+	Kind  string // "oob", "async", "fallback"
+	Value string // slot id for oob, component name for fallback
+}
+
+func (d Decorator) apply(f *ParsedFile) {
+	switch d.Kind {
+	case "oob":
+		f.OOBID = d.Value
+	case "async":
+		f.Async = true
+	case "fallback":
+		f.FallbackOf = d.Value
+	}
+}
+
+func (p *parser) parseDecorator(tok lexer.Token) (Decorator, error) {
+	switch tok.Kind {
+	case lexer.KindAtOOB:
+		// @oob "slot-id"
+		s := p.scanner.Scan()
+		if s.Kind != lexer.KindString {
+			return Decorator{}, fmt.Errorf("expected string after @oob, got %s", s.String(p.src))
+		}
+		return Decorator{Kind: "oob", Value: unquote(s, p.src)}, nil
+	case lexer.KindAtAsync:
+		return Decorator{Kind: "async"}, nil
+	case lexer.KindAtFallback:
+		// @fallback(ComponentName)
+		s := p.scanner.Scan()
+		if s.Kind != lexer.KindLParen {
+			return Decorator{}, fmt.Errorf("expected ( after @fallback")
+		}
+		name := p.scanner.Scan()
+		if name.Kind != lexer.KindIdent {
+			return Decorator{}, fmt.Errorf("expected component name in @fallback")
+		}
+		close := p.scanner.Scan()
+		if close.Kind != lexer.KindRParen {
+			return Decorator{}, fmt.Errorf("expected ) after @fallback name")
+		}
+		return Decorator{Kind: "fallback", Value: name.String(p.src)}, nil
+	}
+	return Decorator{}, fmt.Errorf("unknown decorator")
 }
 
 func (p *parser) parseImport() (Import, error) {
@@ -243,6 +341,24 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 			if err := p.parseSwitch(b); err != nil {
 				return ir.NodeStream{}, err
 			}
+		case lexer.KindAtCase:
+			// @case "admin": — value until the colon.
+			var val strings.Builder
+			for {
+				t := p.scanner.Scan()
+				if t.Kind == lexer.KindColon {
+					break
+				}
+				if t.Kind == lexer.KindEOF {
+					return ir.NodeStream{}, fmt.Errorf("unexpected EOF in @case")
+				}
+				val.WriteString(t.String(p.src))
+			}
+			b.OpenCase(strings.TrimSpace(val.String()))
+		case lexer.KindAtDefault:
+			// @default:
+			p.scanner.Scan() // consume the colon
+			b.OpenDefault()
 		case lexer.KindRBRACE:
 			blockDepth--
 			if blockDepth <= 0 {

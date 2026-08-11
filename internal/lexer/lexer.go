@@ -38,6 +38,13 @@ const (
 	KindAtDefault // @default
 	KindAtView   // @component / @view
 	KindAtChildren // @children
+
+	// Decorators (before func declarations).
+	KindAtOOB     // @oob "slot-id"
+	KindAtAsync   // @async
+	KindAtFallback // @fallback(ComponentName)
+
+	KindColon     // :
 )
 
 // Token is a span of bytes in the source with a Kind
@@ -123,6 +130,9 @@ func (s *Scanner) Scan() Token {
 	case b == '=':
 		s.pos++
 		return Token{Kind: KindEQ, Start: s.pos - 1, End: s.pos}
+	case b == ':':
+		s.pos++
+		return Token{Kind: KindColon, Start: s.pos - 1, End: s.pos}
 	case b == '(':
 		s.pos++
 		return Token{Kind: KindLParen, Start: s.pos - 1, End: s.pos}
@@ -343,6 +353,12 @@ func (s *Scanner) scanAtDirective() Token {
 		return Token{Kind: KindAtView, Start: start, End: s.pos}
 	case "children":
 		return Token{Kind: KindAtChildren, Start: start, End: s.pos}
+	case "oob":
+		return Token{Kind: KindAtOOB, Start: start, End: s.pos}
+	case "async":
+		return Token{Kind: KindAtAsync, Start: start, End: s.pos}
+	case "fallback":
+		return Token{Kind: KindAtFallback, Start: start, End: s.pos}
 	case "import":
 		return Token{Kind: KindAtImport, Start: start, End: s.pos}
 	default:

@@ -89,15 +89,13 @@ func (g *generator) emitFooter() {
 	g.line("}")
 	g.line("")
 
-	// The registration wrapper (external dynamic path).
+	// The registration wrapper (external dynamic path) — the
+	// engine registration always exists so RenderNamed works.
 	regName := "Register" + p.FuncName
 	g.linef("func %s(e *gsx.Engine) {", regName)
 	g.indent = 1
 	g.linef(`e.Register(%q, func(c *render.ComponentContext, data any) error {`, p.FuncName)
 
-	// Bridge: dynamic any → typed props. Always pass nil children
-	// for the dynamic (registry-based) path — children are passed
-	// explicitly in the fast path (gsx-to-gsx component calls).
 	if p.PropsType != "" {
 		g.linef("props := data.(%s)", p.PropsType)
 		g.linef("return Render%s(c, props, nil)", p.FuncName)
@@ -109,6 +107,50 @@ func (g *generator) emitFooter() {
 
 	g.indent = 1
 	g.line("})")
+	g.indent = 0
+	g.line("}")
+	g.line("")
+
+	// Decorator path: if @oob/@async were declared, also emit the
+	// component registration via nanite-render's fluent builder —
+	// this wires Suspense, OOB swaps, and fallbacks into the
+	// ComponentRegistry so templates can dispatch <UserProfile/>
+	// and inherit the lifecycles.
+	if p.OOBID != "" || p.Async {
+		g.emitDecoratedRegistration()
+	}
+}
+
+// emitDecoratedRegistration emits RegisterXComponent(cr) — the
+// fluent builder chain for lifecycle decorators.
+func (g *generator) emitDecoratedRegistration() {
+	p := g.parsed
+	g.linef("func Register%sComponent(cr *render.ComponentRegistry) {", p.FuncName)
+	g.indent = 1
+	g.linef("cr.Define(%q).", p.FuncName)
+
+	chain := make([]string, 0, 3)
+	if p.OOBID != "" {
+		chain = append(chain, fmt.Sprintf("WithOOB(%q)", p.OOBID))
+	}
+	if p.Async {
+		chain = append(chain, "Async()")
+	}
+	// Fallback: another func in this file marked @fallback(Name).
+	if p.Fallback != "" {
+		chain = append(chain, fmt.Sprintf("Fallback(func(c *render.ComponentContext) error { return Render%s(c, nil) })", p.Fallback))
+	}
+	chain = append(chain, "Render(func(c *render.ComponentContext) error {")
+	g.line(strings.Join(chain, "\n"))
+	g.indent++
+	if p.PropsType != "" {
+		g.linef("props := data.(%s)", p.PropsType)
+		g.linef("return Render%s(c, props, nil)", p.FuncName)
+	} else {
+		g.linef("return Render%s(c, nil)", p.FuncName)
+	}
+	g.indent--
+	g.line("}).Register(cr)")
 	g.indent = 0
 	g.line("}")
 }

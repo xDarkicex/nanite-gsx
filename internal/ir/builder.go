@@ -136,6 +136,23 @@ func (b *Builder) OpenSwitch(cond string) {
 	b.stack = append(b.stack, idx)
 }
 
+// OpenCase starts a @case block inside a @switch.
+func (b *Builder) OpenCase(cond string) {
+	idx := len(b.stream.Kind)
+	b.stream.Kind = append(b.stream.Kind, KindCase)
+	b.stream.Cond = append(b.stream.Cond, cond)
+	b.addCommonRaw(idx)
+	b.stack = append(b.stack, idx)
+}
+
+// OpenDefault starts a @default block inside a @switch.
+func (b *Builder) OpenDefault() {
+	idx := len(b.stream.Kind)
+	b.stream.Kind = append(b.stream.Kind, KindDefault)
+	b.addCommonRaw(idx)
+	b.stack = append(b.stack, idx)
+}
+
 // CloseControl closes the innermost control flow block (@if /
 // @else / @for / @switch). Like CloseTag, the close is a no-op
 // node — it doesn't exist in the stream — so we just pop.
