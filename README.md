@@ -12,7 +12,15 @@ Write components like JSX. Compile to Go functions with native `ComponentContext
   ┌──────────────────────────────────────┐
   │  .gsx file (your component)          │
   │                                      │
-  │  func UserCard(user models.User) {   │
+  │  @import { User } from "myapp/models"│
+  │  @css "/static/css/card.css"         │
+  │  @oob "card-slot"                    │
+  │  @async                              │
+  │  @action toggle(user) {              │
+  │    db.Exec("UPDATE ...")             │
+  │  }                                   │
+  │                                      │
+  │  func UserCard(user User) {          │
   │    <div class="card">                │
   │      <h3>{user.Name}</h3>            │
   │      @if user.Admin {                │
@@ -28,28 +36,27 @@ Write components like JSX. Compile to Go functions with native `ComponentContext
   │                                      │
   │  func RenderUserCard(                │
   │    c *render.ComponentContext,       │
-  │    user models.User,                 │
+  │    user User,                        │
   │  ) error {                           │
+  │    c.RequiresCSS("/static/...")      │
   │    c.WriteString(`<div...>`)         │
-  │    c.WriteString(                    │
-  │      html.EscapeString(user.Name))   │
-  │    if user.Admin {                   │
-  │      RenderAdminBadge(c)             │
-  │    }                                 │
-  │    return nil                        │
+  │    ...                               │
   │  }                                   │
   │                                      │
-  │  func RegisterUserCard(e *gsx.Engine) {  │
-  │    e.Register("UserCard", ...)       │
-  │  }                                   │
+  │  func RegisterUserCardComponent(cr)  │
+  │    cr.Define("UserCard")             │
+  │      .WithOOB("card-slot")           │
+  │      .Async()                        │
+  │      .Action("toggle", ...)          │
+  │      .Render(...)                    │
   └──────────────┬───────────────────────┘
                  │  implements render.Engine
                  ▼
   ┌──────────────────────────────────────┐
   │  nanite-render composition hub       │
-  │  Same API as jade, templ, html/tmpl  │
   │  reg.RenderNamed(rc, "gsx", ...)     │
   │  nano.RenderPage(c, reg, ...)        │
+  │  <UserCard/> from any engine         │
   └──────────────┬───────────────────────┘
                  │
                  ▼
@@ -132,11 +139,13 @@ nanite ─── nanite-render ─── nanite-gsx
 | dynamic `className={...}` | `class={"btn " + type}` — split into escaped runtime writes |
 | `<CapitalComponent prop={v}/>` | `<UserCard user={u}/>` → `RenderUserCard(c, u)` — direct Go call |
 | `<Layout><Card/></Layout>` | Non-self-closing components → children closure |
-| `"use server"` mutations | nanite-render `.Action("name", fn)` — HTMX-native |
+| `"use server"` mutations | `@action` — colocated mutations, hoisted to `.Action()` |
+| CSS/JS imports | `@css` / `@js` — compiled to `c.RequiresCSS`/`c.RequiresJS`, deduped into `<NANO_ASSETS/>` |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
 | Error Boundaries | `.ErrorBoundary(fn)` — sync + async |
 | `<Suspense>` / fallback | `@async` + `@fallback(X)` — generated `Async().Fallback()` chain |
+| OOB portal (`createPortal`) | `@oob "slot-id"` — generated `WithOOB()` |
 | `import { X } from "..."` | `@import { X } from "..."` — ES6-style, compiled to Go aliases |
 
 ---
@@ -445,6 +454,54 @@ func RegisterUserProfileComponent(cr *render.ComponentRegistry) {
 
 The skeleton renders inline instantly (TTFB ≈ 0ms); the worker goroutine renders the real profile and streams it as an HTMX OOB swap when done. One file, two functions, zero manual wiring.
 
+### Colocated server actions (`@action`)
+
+Mutation logic lives next to the component. The compiler hoists it into the fluent builder's `.Action()` chain — HTMX-native, router-agnostic, secure by default:
+
+```gsx
+@action toggleAdmin(rc *render.RenderContext, props map[string]any) error {
+    return db.Exec("UPDATE users SET admin = NOT admin WHERE id = ?", props["id"])
+}
+
+func UserCard(user models.User) {
+    <div class="card">
+        <h3>{user.Name}</h3>
+        <button hx-post={c.ActionURL("toggleAdmin")}
+                hx-vals={"id": user.ID}>
+            Toggle Admin
+        </button>
+    </div>
+}
+```
+
+Generated registration:
+
+```go
+cr.Define("UserCard").
+    Action("toggleAdmin", func(rc *render.RenderContext, props map[string]any) error {
+        return db.Exec("UPDATE users SET admin = NOT admin WHERE id = ?", props["id"])
+    }).
+    Render(func(c *render.ComponentContext) error {
+        return RenderUserCard(c, c.Data.(models.User), nil)
+    }).
+    Register(cr)
+```
+
+Mount one handler on the router — `r.Post("/_nano/action/*", reg.HandleAction)` — and every action in every `.gsx` file is live. No router files, no controller wiring, no boilerplate.
+
+### Asset directives (`@css` / `@js`)
+
+Declared at the top of the file, deduplicated into the document head automatically:
+
+```gsx
+@css "/static/css/user-card.css"
+@js "/static/js/chart-init.js"
+
+func UserCard(user models.User) { ... }
+```
+
+The compiler emits `c.RequiresCSS("/static/css/user-card.css")` as the first line of the render function. When the component renders, the asset joins nanite-render's deduplicating graph and `<NANO_ASSETS/>` emits it once into `<head>`. A card rendered 50 times in a loop produces one `<link>` tag.
+
 ### Composition from a handler
 
 ```go
@@ -540,15 +597,23 @@ func (e *Engine) Execute(p *render.Program, w render.ByteWriter, rc *render.Rend
 @import { User, Post } from "myapp/models"
 @import db "myapp/database"
 
+// Asset directives — deduped into <NANO_ASSETS/> in the head.
+@css "/static/css/user-card.css"  // → c.RequiresCSS(...)
+@js "/static/js/chart-init.js"    // → c.RequiresJS(...)
+
 // Lifecycle decorators — wire into nanite-render's Suspense/OOB.
 @oob "card-slot"          // → WithOOB("card-slot")
 @async                    // → Async()
+@action toggle(user models.User) error {
+    // Colocated server action — hoisted to .Action("toggle", fn)
+    db.Exec("UPDATE users SET active = NOT active WHERE id = ?", user.ID)
+    return nil
+}
+
 func UserCard(user User, showEmail bool) {
     // The compiler injects c *render.ComponentContext as the first
     // param. Props are typed — go build catches mismatches.
 
-    // { expr } — Go expression, HTML-escaped
-    <h3>{user.Name}</h3>
     // { expr } — Go expression, HTML-escaped
     <h3>{user.Name}</h3>
 
@@ -590,7 +655,7 @@ func UserCard(user User, showEmail bool) {
 |---|---|---|
 | `<` | Tag mode | Uppercase = component call, lowercase = HTML. Non-self-closing collects inner content as children. `{attr}` values become dynamic attributes. |
 | `{` | Expression mode | Balanced-brace Go expression, HTML-escaped. In attribute position (`class={expr}`), emitted as split escaped runtime output. |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@oob`, `@async`, `@fallback` |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children`, `@oob`, `@async`, `@fallback`, `@action`, `@css`, `@js` |
 
 **Imports — compiled to standard Go:**
 
@@ -615,11 +680,13 @@ Beta. The compiler pipeline is complete and generates valid Go:
 - [x] Children closures (`<Layout><Card/></Layout>` + `@children`)
 - [x] Dynamic attributes (`class={expr}` → `html.EscapeString` at runtime)
 - [x] Lifecycle decorators (`@oob`, `@async`, `@fallback` → fluent chain)
+- [x] Colocated server actions (`@action` → `.Action()` chain)
+- [x] Asset directives (`@css` / `@js` → `c.RequiresCSS`/`c.RequiresJS`)
+- [x] Multi-param registration (`BindProps` + generated props struct)
 - [x] `@switch` / `@case` / `@default`
 - [x] `gsx compile` CLI
 - [x] `gsx watch` (poll-based hot reload)
 - [ ] VS Code extension
-- [ ] Multi-param component registration (v1 asserts the first param)
 
 ---
 
