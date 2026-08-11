@@ -111,6 +111,9 @@ func bodyHasExprs(p *parser.ParsedFile) bool {
 			if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
 				return true
 			}
+			if k < len(s.AttrSpread) && s.AttrSpread[k] {
+				return true
+			}
 		}
 	}
 	return false
@@ -358,6 +361,22 @@ func (g *generator) emitNode(i int) (int, error) {
 	case ir.KindChildren:
 		g.line("if children != nil { children(c) }")
 
+	case ir.KindYield:
+		g.line("if err := c.Yield(); err != nil { return err }")
+
+	case ir.KindFragment:
+		// Fragments (<>...</>) emit no bytes — just walk children.
+		consumed := 1
+		fc := int(s.FirstChild[i])
+		if fc != -1 {
+			n, err := g.walk(fc, g.siblingEnd(fc))
+			if err != nil {
+				return 0, err
+			}
+			consumed += n
+		}
+		return consumed, nil
+
 	case ir.KindComponent:
 		return g.emitComponent(i)
 
@@ -509,16 +528,29 @@ func (g *generator) emitOpenTag(i int) {
 		return
 	}
 
-	// Split attrs into static runs and dynamic expressions.
+	// Split attrs into static runs, dynamic expressions, and
+	// spreads.
 	g.linef("c.WriteString(`<%s`)", tag)
 	for k := start; k < end; k++ {
 		key := s.AttrKeys[k]
 		val := s.AttrVals[k]
-		if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
+		switch {
+		case k < len(s.AttrSpread) && s.AttrSpread[k]:
+			// {...attrs} — spread a map[string]string at runtime.
+			g.linef("for __k, __v := range %s {", val)
+			g.indent++
+			g.line(`c.WriteString(" ")`)
+			g.line("c.WriteString(html.EscapeString(fmt.Sprint(__k)))")
+			g.line(`c.WriteString("=\"")`)
+			g.line("c.WriteString(html.EscapeString(fmt.Sprint(__v)))")
+			g.line(`c.WriteString("\"")`)
+			g.indent--
+			g.line("}")
+		case k < len(s.AttrDynamic) && s.AttrDynamic[k]:
 			g.linef(`c.WriteString(" %s=\"")`, key)
 			g.linef("c.WriteString(html.EscapeString(fmt.Sprint(%s)))", val)
 			g.linef(`c.WriteString("\"")`)
-		} else {
+		default:
 			g.linef(`c.WriteString(" %s=\"%s\"")`, key, val)
 		}
 	}

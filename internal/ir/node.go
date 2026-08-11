@@ -23,7 +23,8 @@ const (
 	KindCase                     // @case val: (child of KindSwitch)
 	KindDefault                  // @default: (child of KindSwitch)
 	KindView                     // marker: start of a @view/component region
-	KindFragment                 // synthetic document root (index 0)
+	KindFragment                 // synthetic document root (index 0) or <></> fragment
+	KindYield                    // @yield — write the pre-rendered view body
 )
 
 // NodeStream is the flat, structure-of-arrays AST produced by
@@ -54,6 +55,7 @@ type NodeStream struct {
 	AttrKeys    []string
 	AttrVals    []string  // always strings in the IR; codegen decides escaping
 	AttrDynamic []bool    // true if AttrVals[i] is a Go expression {expr}
+	AttrSpread  []bool    // true if AttrKeys[i]=="..." — spread a map/struct of attrs
 
 	// Control flow condition (KindIf, KindFor, KindSwitch).
 	Cond []string

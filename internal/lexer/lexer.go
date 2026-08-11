@@ -38,6 +38,7 @@ const (
 	KindAtDefault // @default
 	KindAtView   // @component / @view
 	KindAtChildren // @children
+	KindAtYield  // @yield
 
 	// Decorators (before func declarations).
 	KindAtOOB     // @oob "slot-id"
@@ -362,6 +363,8 @@ func (s *Scanner) scanAtDirective() Token {
 		return Token{Kind: KindAtView, Start: start, End: s.pos}
 	case "children":
 		return Token{Kind: KindAtChildren, Start: start, End: s.pos}
+	case "yield":
+		return Token{Kind: KindAtYield, Start: start, End: s.pos}
 	case "oob":
 		return Token{Kind: KindAtOOB, Start: start, End: s.pos}
 	case "async":

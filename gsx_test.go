@@ -395,6 +395,49 @@ func TestE2E_IfElse(t *testing.T) {
 	}
 }
 
+// TestE2E_YieldFragmentSpread verifies @yield, <>...</>, and
+// {...attrs} codegen.
+func TestE2E_YieldFragmentSpread(t *testing.T) {
+	src := `func AppLayout(attrs map[string]string) {
+    <html>
+        <body>
+            <>
+                <td>a</td>
+                <td>b</td>
+            </>
+            <main {...attrs}>
+                @yield
+            </main>
+        </body>
+    </html>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := files[0]
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := []string{
+		"if err := c.Yield(); err != nil { return err }",
+		"`<td>`",
+		"`</td>`",
+		"for __k, __v := range attrs {",
+	}
+	for _, want := range checks {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"

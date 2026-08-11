@@ -90,6 +90,29 @@ func (b *Builder) AddChildren() {
 	b.addCommon()
 }
 
+// AddYield appends a @yield node — where the pre-rendered view
+// body is written (layout composition).
+func (b *Builder) AddYield() {
+	b.stream.Kind = append(b.stream.Kind, KindYield)
+	b.addCommon()
+}
+
+// OpenFragment starts a <></> fragment — a no-op structural
+// boundary whose children emit consecutively.
+func (b *Builder) OpenFragment() {
+	idx := len(b.stream.Kind)
+	b.stream.Kind = append(b.stream.Kind, KindFragment)
+	b.addCommonRaw(idx)
+	b.stack = append(b.stack, idx)
+}
+
+// CloseFragment closes the innermost fragment.
+func (b *Builder) CloseFragment() {
+	if len(b.stack) > 1 {
+		b.stack = b.stack[:len(b.stack)-1]
+	}
+}
+
 // CloseComponent closes the innermost open component tag
 // (</Name>). Children between OpenComponent and CloseComponent
 // are the component's body.
@@ -222,6 +245,7 @@ func (b *Builder) setAttrs(attrs ...string) {
 		b.stream.AttrKeys = append(b.stream.AttrKeys, key)
 		b.stream.AttrVals = append(b.stream.AttrVals, val)
 		b.stream.AttrDynamic = append(b.stream.AttrDynamic, dynamic)
+		b.stream.AttrSpread = append(b.stream.AttrSpread, key == "...")
 	}
 	b.stream.AttrStart = append(b.stream.AttrStart, start)
 	b.stream.AttrEnd = append(b.stream.AttrEnd, uint32(len(b.stream.AttrKeys)))

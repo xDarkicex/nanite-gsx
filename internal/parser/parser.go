@@ -487,6 +487,8 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 			}
 		case lexer.KindAtChildren:
 			b.AddChildren()
+		case lexer.KindAtYield:
+			b.AddYield()
 
 		case lexer.KindAtFor:
 			blockDepth++
@@ -532,6 +534,16 @@ func (p *parser) parseTag(b *ir.Builder, openTok lexer.Token) error {
 	s := openTok.String(p.src)
 	// Strip < and >
 	inner := s[1 : len(s)-1]
+
+	// Fragments: <> and </>
+	if inner == "" {
+		b.OpenFragment()
+		return nil
+	}
+	if inner == "/" {
+		b.CloseFragment()
+		return nil
+	}
 
 	// Self-closing: <Tag /> or <Tag/>
 	if strings.HasSuffix(inner, "/") {
@@ -667,6 +679,32 @@ func parseAttrs(s string) []string {
 		if len(s) == 0 {
 			break
 		}
+		// Bare spread at attribute position: {...attrs}
+		if s[0] == '{' {
+			depth := 1
+			j := 1
+			for j < len(s) && depth > 0 {
+				if s[j] == '{' {
+					depth++
+				} else if s[j] == '}' {
+					depth--
+				}
+				if depth == 0 {
+					j++
+					break
+				}
+				j++
+			}
+			expr := s[1 : j-1]
+			if strings.HasPrefix(expr, "...") {
+				attrs = append(attrs, "...", expr[3:])
+			} else {
+				// Bare expression attribute (React-style bool).
+				attrs = append(attrs, expr, "true")
+			}
+			s = s[j:]
+			continue
+		}
 		// Read key.
 		i := 0
 		for i < len(s) && s[i] != '=' && s[i] != ' ' && s[i] != '\t' {
@@ -704,6 +742,27 @@ func parseAttrs(s string) []string {
 			}
 			attrs = append(attrs, key, val)
 		} else if s[0] == '{' {
+			// Spread attribute: {...attrs} — a map/struct of
+			// key/value pairs written at runtime.
+			if len(s) >= 4 && s[1] == '.' && s[2] == '.' && s[3] == '.' {
+				depth := 1
+				j := 4
+				for j < len(s) && depth > 0 {
+					if s[j] == '{' {
+						depth++
+					} else if s[j] == '}' {
+						depth--
+					}
+					if depth == 0 {
+						j++
+						break
+					}
+					j++
+				}
+				attrs = append(attrs, "...", s[4:j-1])
+				s = s[j:]
+				continue
+			}
 			// Expression attribute: class={expr}
 			depth := 1
 			j := 1
