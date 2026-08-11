@@ -230,6 +230,9 @@ func (p *parser) parseBody(out *ParsedFile) (ir.NodeStream, error) {
 			if err := p.parseIf(b); err != nil {
 				return ir.NodeStream{}, err
 			}
+		case lexer.KindAtChildren:
+			b.AddChildren()
+
 		case lexer.KindAtFor:
 			blockDepth++
 			if err := p.parseFor(b); err != nil {
@@ -271,17 +274,21 @@ func (p *parser) parseTag(b *ir.Builder, openTok lexer.Token) error {
 		return nil
 	}
 
-	// Closing tag: </Tag>
+	// Closing component tag: </Name>
 	if strings.HasPrefix(inner, "/") {
 		name := strings.TrimSpace(inner[1:])
-		b.CloseTag(name)
+		if isCapital(name) {
+			b.CloseComponent(name)
+		} else {
+			b.CloseTag(name)
+		}
 		return nil
 	}
 
 	// Opening tag: <Tag attrs>
 	name, attrs := parseTagName(inner)
 	if isCapital(name) {
-		b.AddComponent(name, attrs...)
+		b.OpenComponent(name, attrs...)
 	} else {
 		b.OpenTag(name, attrs...)
 	}
@@ -457,6 +464,7 @@ func parseAttrs(s string) []string {
 				j++
 			}
 			attrs = append(attrs, key, s[1:j-1])
+			attrs = append(attrs, "_dynamic") // marker for the builder
 			s = s[j:]
 		} else {
 			// Unquoted value — read until whitespace.

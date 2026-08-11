@@ -52,13 +52,41 @@ func (b *Builder) AddRawExpr(goCode string) {
 	b.addCommon()
 }
 
-// AddComponent appends a component call node (<Name props/>).
-// attrs is alternating key, value pairs.
+// AddComponent appends a self-closing component call node
+// (<Name props/>). attrs is alternating key, value pairs.
 func (b *Builder) AddComponent(name string, attrs ...string) {
 	b.stream.Kind = append(b.stream.Kind, KindComponent)
 	b.stream.Tag = append(b.stream.Tag, name)
 	b.setAttrs(attrs...)
 	b.addCommon()
+}
+
+// OpenComponent starts a non-self-closing component tag
+// (<Name props>). Subsequent nodes become children until
+// CloseComponent is called.
+func (b *Builder) OpenComponent(name string, attrs ...string) {
+	idx := len(b.stream.Kind)
+	b.stream.Kind = append(b.stream.Kind, KindComponent)
+	b.stream.Tag = append(b.stream.Tag, name)
+	b.setAttrs(attrs...)
+	b.addCommonRaw(idx)
+	b.stack = append(b.stack, idx)
+}
+
+// AddChildren appends a @children node — where the children
+// closure is invoked.
+func (b *Builder) AddChildren() {
+	b.stream.Kind = append(b.stream.Kind, KindChildren)
+	b.addCommon()
+}
+
+// CloseComponent closes the innermost open component tag
+// (</Name>). Children between OpenComponent and CloseComponent
+// are the component's body.
+func (b *Builder) CloseComponent(name string) {
+	if len(b.stack) > 0 {
+		b.stack = b.stack[:len(b.stack)-1]
+	}
 }
 
 // OpenTag appends an opening HTML tag and pushes it onto the
@@ -144,12 +172,35 @@ func (b *Builder) OpenFor(cond string) {
 
 func (b *Builder) setAttrs(attrs ...string) {
 	start := uint32(len(b.stream.AttrKeys))
-	for i := 0; i+1 < len(attrs); i += 2 {
-		b.stream.AttrKeys = append(b.stream.AttrKeys, attrs[i])
-		b.stream.AttrVals = append(b.stream.AttrVals, attrs[i+1])
+	for i := 0; i < len(attrs); {
+		key := attrs[i]
+		i++
+		if i >= len(attrs) {
+			break
+		}
+		val := attrs[i]
+		i++
+		dynamic := false
+		// Check for _dynamic marker after the value.
+		if i < len(attrs) && attrs[i] == "_dynamic" {
+			dynamic = true
+			i++
+		}
+		b.stream.AttrKeys = append(b.stream.AttrKeys, key)
+		b.stream.AttrVals = append(b.stream.AttrVals, val)
+		b.stream.AttrDynamic = append(b.stream.AttrDynamic, dynamic)
 	}
 	b.stream.AttrStart = append(b.stream.AttrStart, start)
 	b.stream.AttrEnd = append(b.stream.AttrEnd, uint32(len(b.stream.AttrKeys)))
+}
+
+// setDynamicAttr adds an attribute whose value is a Go
+// expression — the codegen emits html.EscapeString(fmt.Sprint(val))
+// instead of a static string.
+func (b *Builder) setDynamicAttr(key, expr string) {
+	b.stream.AttrKeys = append(b.stream.AttrKeys, key)
+	b.stream.AttrVals = append(b.stream.AttrVals, expr)
+	b.stream.AttrDynamic = append(b.stream.AttrDynamic, true)
 }
 
 func (b *Builder) addCommon() {

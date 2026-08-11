@@ -37,6 +37,7 @@ const (
 	KindAtCase   // @case
 	KindAtDefault // @default
 	KindAtView   // @component / @view
+	KindAtChildren // @children
 )
 
 // Token is a span of bytes in the source with a Kind
@@ -340,6 +341,8 @@ func (s *Scanner) scanAtDirective() Token {
 		return Token{Kind: KindAtDefault, Start: start, End: s.pos}
 	case "component", "view":
 		return Token{Kind: KindAtView, Start: start, End: s.pos}
+	case "children":
+		return Token{Kind: KindAtChildren, Start: start, End: s.pos}
 	case "import":
 		return Token{Kind: KindAtImport, Start: start, End: s.pos}
 	default:

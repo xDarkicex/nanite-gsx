@@ -73,8 +73,10 @@ func (g *generator) emitHeader() {
 		}
 	}
 
-	// The strongly-typed render function.
+	// The strongly-typed render function. Children closure is always
+	// the last param — callers pass nil when there are no children.
 	params := append([]string{"c *render.ComponentContext"}, p.Params...)
+	params = append(params, "children func(c *render.ComponentContext) error")
 	returns := "error"
 	g.line("")
 	g.linef("func Render%s(%s) %s {", p.FuncName, strings.Join(params, ", "), returns)
@@ -93,14 +95,16 @@ func (g *generator) emitFooter() {
 	g.indent = 1
 	g.linef(`e.Register(%q, func(c *render.ComponentContext, data any) error {`, p.FuncName)
 
-	// Bridge: dynamic any → typed props.
+	// Bridge: dynamic any → typed props. Always pass nil children
+	// for the dynamic (registry-based) path — children are passed
+	// explicitly in the fast path (gsx-to-gsx component calls).
 	if p.PropsType != "" {
 		g.linef("props := data.(%s)", p.PropsType)
-		g.linef("return Render%s(c, props)", p.FuncName)
+		g.linef("return Render%s(c, props, nil)", p.FuncName)
 	} else if len(p.Params) == 0 {
-		g.linef("return Render%s(c)", p.FuncName)
+		g.linef("return Render%s(c, nil)", p.FuncName)
 	} else {
-		g.linef("return Render%s(c, data)", p.FuncName)
+		g.linef("return Render%s(c, data, nil)", p.FuncName)
 	}
 
 	g.indent = 1
@@ -153,8 +157,11 @@ func (g *generator) emitNode(i int) (int, error) {
 	case ir.KindHTMLClose:
 		g.linef("c.WriteString(`</%s>`)", s.Tag[i])
 
+	case ir.KindChildren:
+		g.line("if children != nil { children(c) }")
+
 	case ir.KindComponent:
-		g.emitComponent(i)
+		return g.emitComponent(i)
 
 	case ir.KindIf:
 		return g.emitIf(i)
@@ -266,32 +273,61 @@ func (g *generator) emitOpenTag(i int) {
 		g.linef("c.WriteString(`<%s>`)", tag)
 		return
 	}
-	var parts []string
-	parts = append(parts, fmt.Sprintf("<%s", tag))
+
+	// Split attrs into static runs and dynamic expressions.
+	g.linef("c.WriteString(`<%s`)", tag)
 	for k := start; k < end; k++ {
-		parts = append(parts, fmt.Sprintf(` %s="%s"`, s.AttrKeys[k], s.AttrVals[k]))
+		key := s.AttrKeys[k]
+		val := s.AttrVals[k]
+		if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
+			g.linef(`c.WriteString(" %s=\"")`, key)
+			g.linef("c.WriteString(html.EscapeString(fmt.Sprint(%s)))", val)
+			g.linef(`c.WriteString("\"")`)
+		} else {
+			g.linef(`c.WriteString(" %s=\"%s\"")`, key, val)
+		}
 	}
-	parts = append(parts, ">")
-	g.linef("c.WriteString(`%s`)", strings.Join(parts, ""))
+	g.line(`c.WriteString(">")`)
 }
 
-func (g *generator) emitComponent(i int) {
+func (g *generator) emitComponent(i int) (int, error) {
 	s := g.parsed.Body
 	name := s.Tag[i]
 	start := int(s.AttrStart[i])
 	end := int(s.AttrEnd[i])
-	// Component call: RenderUserCard(c, props...)
-	// The first arg is always c *render.ComponentContext.
+
+	// Collect positional args from attributes.
 	var args []string
 	for k := start; k < end; k++ {
 		args = append(args, g.genCompArg(s.AttrKeys[k], s.AttrVals[k]))
 	}
+
+	// Children: if this component was opened (not self-closing),
+	// walk its children and wrap in a closure.
+	consumed := 1
+	fc := int(s.FirstChild[i])
+	if fc != -1 {
+		childEnd := g.siblingEnd(fc)
+		g.linef("if err := Render%s(c, %s, func(c *render.ComponentContext) error {", name, strings.Join(args, ", "))
+		g.indent++
+		if _, err := g.walk(fc, childEnd); err != nil {
+			return 0, err
+		}
+		consumed += childEnd - fc
+		g.indent--
+		g.line("}); err != nil { return err }")
+		return consumed, nil
+	}
+
+	// No children — self-closing component.
+	args = append(args, "nil")
 	call := fmt.Sprintf("if err := Render%s(c", name)
 	if len(args) > 0 {
 		call += ", " + strings.Join(args, ", ")
 	}
 	call += "); err != nil { return err }"
 	g.line(call)
+	return consumed, nil
 }
 
 func (g *generator) genPkgAlias(imp parser.Import) string {

@@ -49,6 +49,7 @@ func UserCard(name string, role string) {
 	checks := []string{
 		"func RenderUserCard",
 		"*render.ComponentContext",
+		"children func",
 		"c.WriteString",
 		"if role",
 		"ADMIN",
@@ -85,6 +86,64 @@ func TestEngine_CaseInsensitiveLookup(t *testing.T) {
 	}
 }
 
+// TestE2E_ChildrenClosure verifies non-self-closing components
+// generate children closures.
+func TestE2E_ChildrenClosure(t *testing.T) {
+	src := `@import "myapp/models"
+
+func DashboardLayout(title string) {
+    <div class="layout">
+        <header>{title}</header>
+        <main>
+            @children
+        </main>
+    </div>
+}`
+
+	parsed, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, "children func") {
+		t.Errorf("missing children param:\n%s", got)
+	}
+	if !strings.Contains(got, "if children != nil { children(c) }") {
+		t.Errorf("missing @children emission:\n%s", got)
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
+// TestE2E_DynamicAttrs verifies class={expr} generates escaped
+// runtime expression output.
+func TestE2E_DynamicAttrs(t *testing.T) {
+	src := `func Button(btnType string) {
+    <button class={"btn " + btnType}>Click</button>
+}`
+
+	parsed, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := codegen.Generate(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(got, `html.EscapeString(fmt.Sprint("btn " + btnType))`) {
+		t.Errorf("missing escaped dynamic attr:\n%s", got)
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
+
 // TestE2E_ComponentCall verifies component call codegen.
 func TestE2E_ComponentCall(t *testing.T) {
 	src := `@import "myapp/models"
@@ -110,7 +169,7 @@ func UserList(users []models.User) {
 	if !strings.Contains(got, "for _, u := range users {") {
 		t.Errorf("missing for loop:\n%s", got)
 	}
-	if !strings.Contains(got, "RenderUserCard(c, u)") {
+	if !strings.Contains(got, "RenderUserCard(c, u,") {
 		t.Errorf("missing direct component call:\n%s", got)
 	}
 	if !strings.Contains(got, "func RegisterUserList") {

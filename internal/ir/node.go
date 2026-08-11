@@ -17,6 +17,7 @@ const (
 	KindHTMLClose                // </lowercase> — close tag
 	KindIf                       // @if cond { ... } — control flow
 	KindFor                      // @for init; cond; post { ... }
+	KindChildren                 // @children — render children closure
 	KindSwitch                   // @switch expr { ... }
 	KindElse                     // @else { ... } (sibling of KindIf)
 	KindCase                     // @case val: (child of KindSwitch)
@@ -47,10 +48,11 @@ type NodeStream struct {
 	// Attributes for KindComponent and KindHTMLTag. Indexed by
 	// (AttrStart[i], AttrEnd[i]); each attribute is a key="value"
 	// pair stored as consecutive entries in AttrKeys/AttrVals.
-	AttrStart []uint32
-	AttrEnd   []uint32
-	AttrKeys  []string
-	AttrVals  []string // always strings in the IR; codegen decides escaping
+	AttrStart   []uint32
+	AttrEnd     []uint32
+	AttrKeys    []string
+	AttrVals    []string  // always strings in the IR; codegen decides escaping
+	AttrDynamic []bool    // true if AttrVals[i] is a Go expression {expr}
 
 	// Control flow condition (KindIf, KindFor, KindSwitch).
 	Cond []string
