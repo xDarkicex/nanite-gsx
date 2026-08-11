@@ -119,6 +119,128 @@ func goStr(s string) string {
 	return s
 }
 
+// reservedLoopNames are the generated render-signature parameter
+// names that @for loop variables must not shadow.
+var reservedLoopNames = map[string]bool{"c": true, "children": true}
+
+// loopVarCollision returns the @for loop variable name that
+// collides with a reserved name (e.g. "c" for `_, c := range x`),
+// or "" when the loop is safe.
+func loopVarCollision(cond string) string {
+	// The declared variables are the identifiers before the first
+	// := or = in the loop clause(s).
+	idx := strings.Index(cond, ":=")
+	if idx < 0 {
+		idx = strings.Index(cond, "=")
+	}
+	if idx < 0 {
+		return ""
+	}
+	vars := cond[:idx]
+	i := 0
+	for i < len(vars) {
+		for i < len(vars) && !isIdentStart(vars[i]) {
+			i++
+		}
+		if i >= len(vars) {
+			break
+		}
+		j := i
+		for j < len(vars) && isIdentChar(vars[j]) {
+			j++
+		}
+		if reservedLoopNames[vars[i:j]] {
+			return vars[i:j]
+		}
+		i = j
+	}
+	return ""
+}
+
+// renameIdentExpr renames a standalone identifier in a Go
+// expression, skipping string literals and field accesses
+// (foo.c is untouched — only the loop variable itself).
+func renameIdentExpr(expr, name, to string) string {
+	var b strings.Builder
+	i := 0
+	for i < len(expr) {
+		ch := expr[i]
+		switch ch {
+		case '"', '\'', '`':
+			// Copy the string literal verbatim.
+			q := ch
+			j := i + 1
+			for j < len(expr) {
+				if expr[j] == '\\' {
+					j += 2
+					continue
+				}
+				if expr[j] == q {
+					j++
+					break
+				}
+				j++
+			}
+			b.WriteString(expr[i:j])
+			i = j
+		default:
+			if isIdentStart(ch) {
+				j := i
+				for j < len(expr) && isIdentChar(expr[j]) {
+					j++
+				}
+				ident := expr[i:j]
+				prevDot := i > 0 && expr[i-1] == '.'
+				if ident == name && !prevDot {
+					b.WriteString(to)
+				} else {
+					b.WriteString(ident)
+				}
+				i = j
+			} else {
+				b.WriteByte(ch)
+				i++
+			}
+		}
+	}
+	return b.String()
+}
+
+// renameExprs applies an identifier rename to every expression in
+// the subtree starting at the sibling range [start, end): KindExpr
+// text and dynamic attribute values, recursively through children.
+func (g *generator) renameExprs(start, end int, name, to string) {
+	for i := start; i < end && i < g.parsed.Body.Count; i++ {
+		g.renameNode(i, name, to)
+	}
+}
+
+// renameNode renames expressions in one node and recurses into its
+// children.
+func (g *generator) renameNode(i int, name, to string) {
+	s := g.parsed.Body
+	if s.Kind[i] == ir.KindExpr {
+		s.Text[i] = renameIdentExpr(s.Text[i], name, to)
+	}
+	for k := int(s.AttrStart[i]); k < int(s.AttrEnd[i]); k++ {
+		if k < len(s.AttrDynamic) && s.AttrDynamic[k] {
+			s.AttrVals[k] = renameIdentExpr(s.AttrVals[k], name, to)
+		}
+	}
+	fc := int(s.FirstChild[i])
+	if fc != -1 {
+		g.renameExprs(fc, g.siblingEnd(fc), name, to)
+	}
+}
+
+func isIdentStart(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isIdentChar(b byte) bool {
+	return isIdentStart(b) || (b >= '0' && b <= '9')
+}
+
 // bodyHasExprs reports whether the body contains Go expressions
 // ({expr}, dynamic attributes) that need the fmt/html imports.
 func bodyHasExprs(p *parser.ParsedFile) bool {
@@ -492,7 +614,21 @@ func (g *generator) emitNode(i int) (int, error) {
 		return g.emitIf(i)
 
 	case ir.KindFor:
-		g.linef("for %s {", s.Cond[i])
+		cond := s.Cond[i]
+		if bad := loopVarCollision(cond); bad != "" {
+			// The loop variable shadows a generated render-signature
+			// name (c — the ComponentContext, children — the children
+			// closure). Rename it in the condition and every
+			// expression in the loop body so the generated code
+			// still compiles.
+			to := "__" + bad
+			cond = renameIdentExpr(cond, bad, to)
+			fc := int(s.FirstChild[i])
+			if fc != -1 {
+				g.renameExprs(fc, g.siblingEnd(fc), bad, to)
+			}
+		}
+		g.linef("for %s {", cond)
 		g.indent++
 		consumed := 1
 		fc := int(s.FirstChild[i])

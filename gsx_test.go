@@ -760,3 +760,48 @@ func TestE2E_QuotedAttrValue(t *testing.T) {
 	}
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_ForLoopVarShadowing verifies @for loop variables that
+// collide with the generated render-signature names (c, children)
+// are renamed so the generated Go still compiles — and that the
+// context remains accessible inside the loop body.
+func TestE2E_ForLoopVarShadowing(t *testing.T) {
+	src := `func List(items []string) {
+    <ul>
+        @for _, c := range items {
+            <li>{c} {c.ActionURL("x")}</li>
+        }
+        @for _, children := range items {
+            <li>{children}</li>
+        }
+    </ul>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := codegen.Generate(files[0])
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	for _, want := range []string{
+		"for _, __c := range items {",
+		"for _, __children := range items {",
+		"html.EscapeString(fmt.Sprint(__c))",
+		"html.EscapeString(fmt.Sprint(__children))",
+		// The context is still accessible inside the loop body.
+		"__c.ActionURL(\"x\")",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	// No raw shadowing left behind.
+	if strings.Contains(got, "for _, c := range") {
+		t.Errorf("loop var c not renamed:\n%s", got)
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
