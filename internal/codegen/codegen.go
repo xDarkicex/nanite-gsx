@@ -11,17 +11,49 @@ import (
 	"github.com/xDarkicex/nanite-gsx/internal/parser"
 )
 
-// Generate produces the complete .go output for a parsed .gsx
-// file: imports, the strongly-typed render function (internal
-// fast path), and the Engine registration wrapper (external
-// dynamic path via render.Engine).
+// Generate produces the complete .go output for a single parsed
+// .gsx func: imports, the strongly-typed render function
+// (internal fast path), and the Engine registration wrapper
+// (external dynamic path via render.Engine).
 func Generate(p *parser.ParsedFile) (string, error) {
-	g := &generator{buf: new(bytes.Buffer), parsed: p}
+	return GenerateFile([]*parser.ParsedFile{p})
+}
+
+// GenerateFile produces the .go output for a whole .gsx file
+// (possibly multiple funcs, e.g. a component + its fallback).
+// The first func's imports apply to the file.
+func GenerateFile(files []*parser.ParsedFile) (string, error) {
+	if len(files) == 0 {
+		return "", nil
+	}
+	main := files[0]
+	g := &generator{buf: new(bytes.Buffer)}
+	g.parsed = main
 	g.emitHeader()
-	if _, err := g.walk(0, p.Body.Count); err != nil {
+	if _, err := g.walk(0, main.Body.Count); err != nil {
 		return "", err
 	}
+	g.indent = 0
+	g.line("return nil")
 	g.emitFooter()
+
+	// Additional funcs (fallbacks etc.) — each with its own
+	// render + registration.
+	for _, f := range files[1:] {
+		g.parsed = f
+		g.line("")
+		g.line("")
+		params := append([]string{"c *render.ComponentContext"}, f.Params...)
+		params = append(params, "children func(c *render.ComponentContext) error")
+		g.linef("func Render%s(%s) error {", f.FuncName, strings.Join(params, ", "))
+		g.indent = 1
+		if _, err := g.walk(0, f.Body.Count); err != nil {
+			return "", err
+		}
+		g.indent = 0
+		g.line("return nil")
+		g.emitFooter()
+	}
 	return g.buf.String(), nil
 }
 
@@ -52,7 +84,8 @@ func (g *generator) emitHeader() {
 		case len(imp.Symbols) > 0:
 			g.linef(`%s %q`, g.genPkgAlias(imp), imp.Path)
 		default:
-			g.linef(`_ %q`, imp.Path)
+			// Plain @import "path" — a normal Go import.
+			g.linef(`%q`, imp.Path)
 		}
 	}
 	g.line("")
@@ -96,14 +129,8 @@ func (g *generator) emitFooter() {
 	g.indent = 1
 	g.linef(`e.Register(%q, func(c *render.ComponentContext, data any) error {`, p.FuncName)
 
-	if p.PropsType != "" {
-		g.linef("props := data.(%s)", p.PropsType)
-		g.linef("return Render%s(c, props, nil)", p.FuncName)
-	} else if len(p.Params) == 0 {
-		g.linef("return Render%s(c, nil)", p.FuncName)
-	} else {
-		g.linef("return Render%s(c, data, nil)", p.FuncName)
-	}
+	args := g.registrationArgs()
+	g.linef("return Render%s(c, %s)", p.FuncName, strings.Join(args, ", "))
 
 	g.indent = 1
 	g.line("})")
@@ -127,28 +154,28 @@ func (g *generator) emitDecoratedRegistration() {
 	p := g.parsed
 	g.linef("func Register%sComponent(cr *render.ComponentRegistry) {", p.FuncName)
 	g.indent = 1
-	g.linef("cr.Define(%q).", p.FuncName)
 
-	chain := make([]string, 0, 3)
+	// Build the chain: cr.Define("X").WithOOB(...).Async()...
+	chain := fmt.Sprintf("cr.Define(%q)", p.FuncName)
 	if p.OOBID != "" {
-		chain = append(chain, fmt.Sprintf("WithOOB(%q)", p.OOBID))
+		chain += fmt.Sprintf(".WithOOB(%q)", p.OOBID)
 	}
 	if p.Async {
-		chain = append(chain, "Async()")
+		chain += ".Async()"
 	}
-	// Fallback: another func in this file marked @fallback(Name).
 	if p.Fallback != "" {
-		chain = append(chain, fmt.Sprintf("Fallback(func(c *render.ComponentContext) error { return Render%s(c, nil) })", p.Fallback))
+		chain += fmt.Sprintf(".Fallback(func(c *render.ComponentContext) error { return Render%s(c, nil) })", p.Fallback)
 	}
-	chain = append(chain, "Render(func(c *render.ComponentContext) error {")
-	g.line(strings.Join(chain, "\n"))
+	g.linef("%s.Render(func(c *render.ComponentContext) error {", chain)
 	g.indent++
-	if p.PropsType != "" {
-		g.linef("props := data.(%s)", p.PropsType)
-		g.linef("return Render%s(c, props, nil)", p.FuncName)
-	} else {
-		g.linef("return Render%s(c, nil)", p.FuncName)
+	// The Render closure receives c *ComponentContext — data is on c.Data.
+	args := g.registrationArgs()
+	// registrationArgs emits data.(Type); in the registry path the
+	// data is c.Data.
+	for i := range args {
+		args[i] = strings.Replace(args[i], "data.", "c.Data.", 1)
 	}
+	g.linef("return Render%s(c, %s)", p.FuncName, strings.Join(args, ", "))
 	g.indent--
 	g.line("}).Register(cr)")
 	g.indent = 0
@@ -304,6 +331,27 @@ func (g *generator) emitIf(i int) (int, error) {
 	}
 	g.line("}")
 	return consumed, nil
+}
+
+// registrationArgs builds the argument list for the engine
+// registration wrapper. The render signature is
+// (c, p1..pN, children) — so N params produce N+1 args:
+// N type-asserted data args + nil children.
+func (g *generator) registrationArgs() []string {
+	p := g.parsed
+	var args []string
+	if len(p.Params) > 0 {
+		// Param format: "name Type" or "name, name2 Type" (grouped).
+		// Take the type from the first param.
+		first := p.Params[0]
+		fields := strings.Fields(first)
+		if len(fields) > 0 {
+			typ := fields[len(fields)-1]
+			args = append(args, fmt.Sprintf("data.(%s)", typ))
+		}
+	}
+	args = append(args, "nil") // children closure
+	return args
 }
 
 func (g *generator) emitOpenTag(i int) {
