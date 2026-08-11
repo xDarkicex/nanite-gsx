@@ -128,7 +128,10 @@ nanite ─── nanite-render ─── nanite-gsx
 | JSX `<h1>{name}</h1>` | `{name}` — same syntax, HTML-escaped |
 | `{condition && <Thing/>}` | `@if condition { <Thing/> }` |
 | `.map()` loops | `@for _, item := range items { ... }` |
+| `{props.children}` | `@children` — renders the children closure |
+| dynamic `className={...}` | `class={"btn " + type}` — split into escaped runtime writes |
 | `<CapitalComponent prop={v}/>` | `<UserCard user={u}/>` → `RenderUserCard(c, u)` — direct Go call |
+| `<Layout><Card/></Layout>` | Non-self-closing components → children closure |
 | `"use server"` mutations | nanite-render `.Action("name", fn)` — HTMX-native |
 | `useId()` | `c.UseId()` — per-request, zero-alloc first 256 |
 | Context / `useContext` | `c.ProvideContext` / `c.UseContext` — zero-alloc stack |
@@ -296,6 +299,76 @@ r.Get("/dashboard", func(c *nanite.Context) {
 
 The flow: Jade renders the layout → `{{ yield }}` triggers → `gsx.Engine.Execute` calls `RenderDashboard(c, data)` → `<Header user={user}/>` calls `RenderHeader(c, user)` directly → `<StatsGrid stats={user.Stats}/>` calls `RenderStatsGrid(c, user.Stats)` directly.
 
+### React-style children composition
+
+Non-self-closing components collect their inner content as a children closure. Use `@children` to place it:
+
+```gsx
+// views/dashboard_layout.gsx
+@import "myapp/models"
+
+func DashboardLayout(title string) {
+    <div class="layout">
+        <header class="layout-header">
+            <h1>{title}</h1>
+        </header>
+        <main class="layout-body">
+            @children
+        </main>
+    </div>
+}
+```
+
+```gsx
+// views/dashboard.gsx
+func Dashboard(user models.User) {
+    <DashboardLayout title={"Welcome, " + user.Name}>
+        <UserCard user={user} />
+        <p>Your recent activity:</p>
+        <ActivityFeed />
+    </DashboardLayout>
+}
+```
+
+Compiles to:
+
+```go
+// Self-closing: <UserCard user={user} />  → children = nil
+RenderUserCard(c, user, nil)
+
+// Non-self-closing: wraps the inner content in a closure
+RenderDashboardLayout(c, "Welcome, Alice", func(c *render.ComponentContext) error {
+    if err := RenderUserCard(c, user, nil); err != nil { return err }
+    c.WriteString(`<p>Your recent activity:</p>`)
+    if err := RenderActivityFeed(c, nil); err != nil { return err }
+    return nil
+})
+```
+
+Every generated function includes a `children func(c *render.ComponentContext) error` final param. `@children` emits `if children != nil { children(c) }`. Zero reflection, zero registry lookups — just a Go function call.
+
+### Dynamic attributes
+
+Expression attributes generate runtime-escaped output:
+
+```gsx
+<button class={"btn " + btnType} hx-get={"/users/" + user.ID}>
+    Click
+</button>
+```
+
+Compiles to:
+
+```go
+c.WriteString(`<button class="`)
+c.WriteString(html.EscapeString(fmt.Sprint("btn " + btnType)))
+c.WriteString(`" hx-get="`)
+c.WriteString(html.EscapeString(fmt.Sprint("/users/" + user.ID)))
+c.WriteString(`">Click</button>`)
+```
+
+Static attributes stay as single `c.WriteString` calls. Only `{expr}` values get split into escaped runtime output. Genuinely useful for CSS class composition and HTMX URL building.
+
 ### HTMX partial swap with server actions
 
 ```gsx
@@ -437,6 +510,17 @@ func UserCard(user User, showEmail bool) {
 
     // Capital tags → direct Go function calls (fast path)
     <Avatar user={user} size="lg" />
+
+    // Non-self-closing tags → children closure
+    <DashboardLayout title="Admin">
+        <UserCard user={user} />
+    </DashboardLayout>
+
+    // @children — place the children closure
+    @children
+
+    // Dynamic attributes — expressions in attribute values
+    <button class={"btn " + btnType} hx-get={"/users/" + user.ID}>
 }
 ```
 
@@ -446,9 +530,9 @@ func UserCard(user User, showEmail bool) {
 
 | Trigger | Mode | What happens |
 |---|---|---|
-| `<` | Tag mode | Uppercase = component call, lowercase = HTML |
-| `{` | Expression mode | Balanced-brace Go expression, HTML-escaped |
-| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import` |
+| `<` | Tag mode | Uppercase = component call, lowercase = HTML. Non-self-closing collects inner content as children. `{attr}` values become dynamic attributes. |
+| `{` | Expression mode | Balanced-brace Go expression, HTML-escaped. In attribute position (`class={expr}`), emitted as split escaped runtime output. |
+| `@` | Directive mode | `@if`, `@for`, `@switch`, `@import`, `@children` |
 
 **Imports — compiled to standard Go:**
 
@@ -470,6 +554,8 @@ Alpha. The prototype pipeline is complete:
 - [x] `gsx.Engine` implementing `render.Engine`
 - [x] Direct component calls (`<Card/>` → `RenderCard(c, props)`)
 - [x] `@import` (3 forms)
+- [x] Children closures (`<Layout><Card/></Layout>` + `@children`)
+- [x] Dynamic attributes (`class={expr}` → `html.EscapeString` at runtime)
 - [ ] `gsx compile` CLI
 - [ ] `@switch` / `@case`
 - [ ] Attribute expression values (`class={expr}`)
