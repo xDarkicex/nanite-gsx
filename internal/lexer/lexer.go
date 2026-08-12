@@ -230,7 +230,11 @@ func (s *Scanner) scanText() Token {
 	// via the parser's KindString append.
 	for s.pos < s.end {
 		b := s.src[s.pos]
-		if b == '<' || b == '{' || b == '@' || b == '"' || b == '\'' || b == '`' {
+		// } is a stop too: a block-closing brace must reach the
+		// parser, not be swallowed into text (which unbalances
+		// @if/@else blocks whose bodies are plain text).
+		if b == '<' || b == '{' || b == '@' || b == '}' ||
+			b == '"' || b == '\'' || b == '`' {
 			break
 		}
 		s.pos++

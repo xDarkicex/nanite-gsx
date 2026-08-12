@@ -851,3 +851,46 @@ func Widget(props map[string]any) {
 	}
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_IfElseInTagText verifies @if/@else whose branches are
+// plain text inside a tag (e.g. a button label) — the closing }
+// must not be swallowed by the text scanner, or the else attaches
+// to the wrong node.
+func TestE2E_IfElseInTagText(t *testing.T) {
+	src := `func Toggle(on bool) {
+    <button>
+        @if on {
+            Mark open
+        } @else {
+            Mark done
+        }
+    </button>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got, err := codegen.Generate(files[0])
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+
+	// Both branches must emit as Go control flow with the else
+	// properly paired — no literal } in the text output.
+	for _, want := range []string{
+		"if on {",
+		"} else {",
+		"c.WriteString(`Mark open",
+		"c.WriteString(`Mark done",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Mark open\n }") {
+		t.Errorf("closing brace swallowed into text:\n%s", got)
+	}
+
+	t.Logf("\nGenerated output:\n%s", got)
+}
