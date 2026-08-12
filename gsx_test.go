@@ -805,3 +805,49 @@ func TestE2E_ForLoopVarShadowing(t *testing.T) {
 
 	t.Logf("\nGenerated output:\n%s", got)
 }
+
+// TestE2E_ActionCommentApostrophe verifies @action body capture
+// handles comments: an apostrophe in a // comment must not open a
+// string (G3), braces in comments must not unbalance the depth,
+// and /* block comments */ work too.
+func TestE2E_ActionCommentApostrophe(t *testing.T) {
+	src := `@action Save(rc *render.RenderContext, props map[string]any) error {
+    // The panels' data reloads here — don't drop the apostrophes.
+    if props["x"] == "{not-a-brace}" {
+        return nil
+    }
+    /* block comment with 'apostrophes' and {braces} */
+    return nil
+}
+
+func Widget(props map[string]any) {
+    <div>ok</div>
+}`
+
+	files, err := parser.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(files) != 1 || len(files[0].Actions) != 1 {
+		t.Fatalf("expected 1 file with 1 action, got %d/%d", len(files), len(files[0].Actions))
+	}
+	body := files[0].Actions[0].Body
+	for _, want := range []string{
+		"// The panels' data reloads here — don't drop the apostrophes.",
+		"/* block comment with 'apostrophes' and {braces} */",
+		`props["x"] == "{not-a-brace}"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+
+	got, err := codegen.Generate(files[0])
+	if err != nil {
+		t.Fatalf("codegen: %v", err)
+	}
+	if !strings.Contains(got, "don't drop the apostrophes.") {
+		t.Errorf("comment not preserved in generated code:\n%s", got)
+	}
+	t.Logf("\nGenerated output:\n%s", got)
+}

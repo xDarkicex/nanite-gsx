@@ -277,6 +277,42 @@ sigDone:
 				goto bodyDone
 			}
 			body.WriteByte(b)
+		case '/':
+			body.WriteByte(b)
+			n := p.scanner.NextByte()
+			if n == 0 {
+				return act, fmt.Errorf("unexpected EOF in @action body")
+			}
+			body.WriteByte(n)
+			if n == '/' {
+				// Line comment — copy verbatim until the newline.
+				// Apostrophes and braces inside comments must not
+				// open strings or count toward the brace depth.
+				for {
+					c := p.scanner.NextByte()
+					if c == 0 {
+						return act, fmt.Errorf("unexpected EOF in @action comment")
+					}
+					body.WriteByte(c)
+					if c == '\n' {
+						break
+					}
+				}
+			} else if n == '*' {
+				// Block comment — copy verbatim until */.
+				prev := byte(0)
+				for {
+					c := p.scanner.NextByte()
+					if c == 0 {
+						return act, fmt.Errorf("unexpected EOF in @action comment")
+					}
+					body.WriteByte(c)
+					if prev == '*' && c == '/' {
+						break
+					}
+					prev = c
+				}
+			}
 		case '"', '\'', '`':
 			body.WriteByte(b)
 			// Skip the string contents.
